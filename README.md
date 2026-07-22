@@ -100,21 +100,18 @@ INSTALL.md
 
 ## 短视频评论一直转圈？
 
-你的判断很可能对：**评论半屏里有广告组件**，不是评论主接口被拦。
+根因：`DOMAIN,cm.bilibili.com,REJECT` 整域拒绝太狠。  
+评论半屏广告组件（`story_commentAd*` / `comment_card_ad_data` / Reply `CM`）会访问该域；整域拒绝时 UI 可能一直等。
 
-IPA 证据：
-- Story 有 `story_commentAdDisplayedWithInfo` / `story_commentAdClickedWithInfo`
-- 评论体系有 `BAPIMainCommunityReplyV1CM`、`comment_card_ad_data`、`isAdCommentArea`
-- 评论请求带 `adExtra`，广告素材域名包含 `cm.bilibili.com`
+### 当前策略（v1.1.3）
 
-v1.1.1 的“去重 protobuf”已**还原**。
-v1.1.2 改为：
-
-- **取消** `DOMAIN,cm.bilibili.com,REJECT` 整域拦截  
-- 其它广告 Map Local / JSON / proto 保持  
+- **不**整域 REJECT `cm.bilibili.com`
+- 对已知广告路径 **Map Local 返回空 JSON `{}`**
+- 广告组件拿到“成功但无素材”后应快速结束，评论列表可继续出
 - 评论主接口 `Reply/MainList`、`/x/v2/reply*` 仍不拦截
 
-请更新到 **1.1.2** 后再试短视频评论。
+若某条 cm 路径仍出广告，把 Surge 请求 URL 发来，再补 Map Local。
+
 
 ## License
 

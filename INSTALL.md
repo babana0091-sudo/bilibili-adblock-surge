@@ -1,34 +1,30 @@
-# 安装说明（Surge）
+# 安装与自动更新
 
-## 一句话
-
-在 Surge「模块 → 安装新模块」里粘贴：
+## 请用这条（可自动更新）
 
 ```text
 https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bilibili-adblock.sgmodule
 ```
 
-## 和其他仓库一样的装法
+## 为什么别人的能更新
 
-| 仓库 | 安装的是 |
-|---|---|
-| BiliUniverse ADBlock | `.../BiliBili.ADBlock.sgmodule` 的 **release/raw 文件** |
-| app2smile/rules | `.../module/bilibili.sgmodule` 的 **raw 文件** |
-| 本仓库 | `.../bilibili-adblock.sgmodule` 的 **raw 文件** |
+他们装的是 **GitHub raw 分支文件**：
 
-共同点：**永远是 `.sgmodule` 文件直链，不是 GitHub 仓库页。**
+- app2smile: `raw.githubusercontent.com/.../master/module/bilibili.sgmodule`
+- ClydeTime 签到: `raw.githubusercontent.com/.../main/modules/BiliBiliDailyBonus.sgmodule`
 
-## 图文步骤（iOS）
+Surge 保存的是这个 URL；点更新时重新下载同一路径最新内容。
 
-1. Surge → **模块**
-2. **安装新模块...**
-3. 粘贴 raw 链接
-4. 保存并勾选启用
-5. 模块列表应出现：**哔哩哔哩去广告（融合增强）**
-6. 开启 MITM + **MITM over HTTP/2**
+## 为什么 release 链不适合日常更新
 
-## 你截图里的问题
+```text
+.../releases/download/v1.0.1/bilibili-adblock.sgmodule
+```
 
-- 出现 `19cb4c92...` +「无描述」+「并非有效的 Surge 配置文件」
-- 说明当时导入的不是有效 sgmodule 内容（常见是仓库首页 HTML）
-- **删掉那个 hash 模块**，改用 raw 链接重装即可
+URL 里写死了 `v1.0.1`，发 v1.2 时旧 URL 仍指向旧文件，**不会自动跳版本**。
+
+## 操作
+
+1. 模块 → 安装新模块 → 粘贴 raw 链  
+2. 以后：模块 → 更新  
+3. 开 MITM + HTTP/2

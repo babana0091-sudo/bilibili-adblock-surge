@@ -1,79 +1,102 @@
 # 哔哩哔哩去广告（融合增强）· Surge 模块
 
-> **纯网络 MITM**：只改 HTTP/HTTPS/gRPC 响应。  
+> **纯网络 MITM**：只改 HTTP/HTTPS/gRPC 响应 + 可选定时签到。  
 > **不修改 App、不涉及越狱/注入。**
 
-## 安装（重要）
+## 1) 能不能自动更新？
 
-Surge **不能** 安装 GitHub 仓库首页链接。  
-必须安装 **`.sgmodule` 的 raw 直链**（和 BiliUniverse / app2smile 一样）。
+### 结论
 
-### 推荐安装链接（复制整行）
+| 安装链接类型 | 能否被 Surge 自动更新 | 例子 |
+|---|---|---|
+| **分支 raw 永久链**（`.../main/xxx.sgmodule`） | **能**（模块列表可「更新」拉最新文件） | app2smile、ClydeTime 签到模块 |
+| **Release 带版本号链**（`.../releases/download/v1.0.1/...`） | **不能自动变到新版本**（URL 钉死版本） | 我们之前的 v1.0.1 release、BiliUniverse 部分 release 资产 |
+| GitHub 仓库首页 / blob 页 | 无效 | 会报「并非有效的配置文件」 |
+
+别人能自动更新，是因为他们给的是：
+
+```text
+https://raw.githubusercontent.com/<user>/<repo>/<branch>/xxx.sgmodule
+```
+
+**不是** release 版本号链接。
+
+### 我们推荐安装（可自动更新）
 
 ```text
 https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bilibili-adblock.sgmodule
 ```
 
-备用（jsDelivr）：
+备用 CDN：
 
 ```text
 https://cdn.jsdelivr.net/gh/babana0091-sudo/bilibili-adblock-surge@main/bilibili-adblock.sgmodule
 ```
 
-### iOS Surge 操作步骤
+Release 资产仍可用于「固定某一版」，但不适合日常自动更新。
 
-1. 打开 **Surge** → 底部 **首页**
-2. 点 **模块**
-3. 点 **安装新模块...**
-4. 粘贴上面的 **raw 链接**（以 `raw.githubusercontent.com` 或 `cdn.jsdelivr.net` 开头，以 `.sgmodule` 结尾）
-5. 点右上角保存 / 勾选启用
-6. 确认模块名显示为：**哔哩哔哩去广告（融合增强）**
-7. 开启 **MITM**，并打开 **MITM over HTTP/2**
-8. 如已安装其他 B 站去广告模块（如 BiliUniverse），建议先关掉，避免重复处理
+### iOS 安装步骤
 
-### 错误对照
+1. Surge → **模块** → **安装新模块...**
+2. 粘贴上面的 **raw** 链接（必须以 `.sgmodule` 结尾）
+3. 保存并勾选启用
+4. 以后要更新：模块右侧 `···` → **更新**（或等 Surge 自动检查）
+5. 开启 **MITM + MITM over HTTP/2**
 
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| `并非有效的 Surge 配置文件` | 装了仓库首页 / HTML / 非 raw 链接 | 改用本文 raw 链接 |
-| 模块名是一串 hash、描述「无描述」 | 同上，下载到的不是 sgmodule | 删除该模块，重装 raw 链接 |
-| 模块装上了但广告还在 | 未开 HTTP/2 MITM，或与其他模块冲突 | 开 HTTP/2；只保留一个 B 站模块 |
-
-### 不要用这些链接安装
+不要用：
 
 ```text
 https://github.com/babana0091-sudo/bilibili-adblock-surge
-https://github.com/babana0091-sudo/bilibili-adblock-surge.git
-https://github.com/babana0091-sudo/bilibili-adblock-surge/blob/main/bilibili-adblock.sgmodule
+.../blob/main/...
+.../releases/download/v1.0.1/...   # 固定版本，不自动升到 v1.1
 ```
 
-以上都会拿到网页 HTML，Surge 会报「并非有效的配置文件」。
+---
 
-## 功能开关（默认全开）
+## 2) 功能开关（中文）
 
-| 开关 | 作用 |
-|---|---|
-| **常规广告** | 开屏 / 推荐 / Banner / 搜索 / 直播番剧基础广告 |
-| **暂停广告** | 播放页 gRPC 商业卡清理（网络层能清的部分） |
-| **小游戏广告** | biligame 广告位、IAA、miniapp ad query、直播小游戏物料 |
-| **短剧广告** | Story 竖屏流广告 + playlet 推广 + PGC 投放 |
+| 开关 | 默认 | 说明 |
+|---|---|---|
+| **常规广告** | 开 | 开屏/推荐/Banner/搜索/直播番剧基础广告 |
+| **暂停广告** | 开 | 播放页 gRPC 商业卡（网络层） |
+| **小游戏广告** | 开 | biligame 广告位 / IAA / miniapp ad |
+| **短剧广告** | 开 | Story / playlet 推广 |
+| **自动签到** | 开 | 抓 Cookie + 每天 7:30 签到 |
+| **银瓜子换硬币** | 关 | 签到时可选 |
+| **调试日志** | 关 |  |
 
-装好后：模块 → 点本模块 → 参数里可开关。
+---
+
+## 3) 自动签到怎么用
+
+完全是 **Surge 脚本 + 网络 API**（参考 ClydeTime / chavyleung 思路，对照 IPA 中 `fingerprint` 等路径），不是越狱。
+
+1. 安装并启用本模块  
+2. **完全退出** 哔哩哔哩 App 后重新打开首页一次  
+3. 若 Cookie 抓到，会通知「Cookie 已更新」  
+4. 每天 **07:30** 自动执行：
+   - 直播签到 `DoSign`
+   - 查询经验任务状态 `exp/reward`
+   - 尝试大会员福利领取 `vip/privilege/receive`（不符合资格会提示失败，可忽略）
+   - 可选：银瓜子换硬币
+
+关闭签到：模块参数里把 **自动签到** 设为 `false`。
+
+> 说明：完整「投币/分享/点赞刷经验」链路更复杂且风控更高；当前版本先做**签到核心**（直播签到 + 福利领取 + 状态查询）。需要再加投币可继续迭代。
+
+---
 
 ## 仓库结构
 
 ```text
-bilibili-adblock.sgmodule   # 给 Surge「安装新模块」用的入口
+bilibili-adblock.sgmodule   # 安装入口（请用 raw 链）
 js/json-response.js
 js/proto-response.js
+js/checkin.js               # 抓 Cookie + 定时签到
 js/common.js
 docs/interfaces.md
+INSTALL.md
 ```
-
-## 能力边界
-
-**能做：** Rule / Map Local / Script 改写网络响应  
-**不能做：** 改 IPA、越狱 Hook、控制播放器本地 UI
 
 ## License
 

@@ -316,7 +316,6 @@ if (!$response || $response.body == null) {
   } catch (e) {
     log(opts.调试日志, "json parse fail");
     $done({});
-    return;
   }
 
   try {
@@ -347,22 +346,32 @@ if (!$response || $response.body == null) {
     else if (/x\/v2\/banner/i.test(url)) body = handleBanner(body, opts);
     else if (/x\/web-interface\/wbi\/index\/top\/feed\/rcmd/i.test(url))
       body = handleFeed(body, opts, url);
-    else {
-      // 未识别接口：直接放行，避免 deep clean 拖慢评论区/播放页附属请求
-      $done({});
-      return;
+    else body = cleanObject(body, opts);
+
+    // pause-ad related json endpoints (defensive)
+    if (
+      opts.暂停广告 &&
+      /pause|under_?player|underframe|paused?_?page/i.test(url)
+    ) {
+      if (body && body.data && typeof body.data === "object") {
+        body.data = Array.isArray(body.data) ? [] : {};
+      }
+    }
+    // mini game advertising endpoints
+    if (
+      opts.小游戏广告 &&
+      /advertising_position|iaa_ad_style|miniapp\/.*\/ad\//i.test(url)
+    ) {
+      body = {
+        code: 0,
+        message: "0",
+        ttl: 1,
+        data: Array.isArray(body && body.data) ? [] : {},
+      };
     }
   } catch (e) {
-    // fail-open：改写异常时不阻断原响应
     log(opts.调试日志, "handle error", e);
-    $done({});
-    return;
   }
 
-  try {
-    $done({ body: JSON.stringify(body) });
-  } catch (e) {
-    log(opts.调试日志, "stringify fail", e);
-    $done({});
-  }
+  $done({ body: JSON.stringify(body) });
 }

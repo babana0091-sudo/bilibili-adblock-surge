@@ -98,6 +98,18 @@ docs/interfaces.md
 INSTALL.md
 ```
 
+## 评论区变慢？
+
+v1.1.1 已修复：
+
+1. **移除播放页重型 protobuf 改写**（原 `View/View` 全量二进制解析会拖慢进评论前链路）
+2. **取消** 对 `api/app.biliapi.*` 的整域 REJECT（避免备用域名重试）
+3. JSON 脚本对未识别接口 **直接放行**，不再 deep-clean
+
+评论主接口本身（`Reply/MainList`、`/x/v2/reply*`）本来就不会被匹配。
+
+请把模块更新到 **1.1.1** 后再试评论区。
+
 ## License
 
 MIT

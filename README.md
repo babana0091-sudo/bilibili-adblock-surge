@@ -101,16 +101,19 @@ INSTALL.md
 ## 短视频评论一直转圈？
 
 根因：`DOMAIN,cm.bilibili.com,REJECT` 整域拒绝太狠。  
-评论半屏广告组件（`story_commentAd*` / `comment_card_ad_data` / Reply `CM`）会访问该域；整域拒绝时 UI 可能一直等。
+评论半屏广告组件会访问该域，整域拒绝时 UI 可能一直等。
 
-### 当前策略（v1.1.3）
+### 当前版本：v1.1.2（按用户要求回退）
 
-- **不**整域 REJECT `cm.bilibili.com`
-- 对已知广告路径 **Map Local 返回空 JSON `{}`**
-- 广告组件拿到“成功但无素材”后应快速结束，评论列表可继续出
-- 评论主接口 `Reply/MainList`、`/x/v2/reply*` 仍不拦截
+- **取消** `DOMAIN,cm.bilibili.com,REJECT`
+- **不**对 cm 做 Map Local 空返回（1.1.3 已回退）
+- 其它去广告逻辑保持
 
-若某条 cm 路径仍出广告，把 Surge 请求 URL 发来，再补 Map Local。
+安装：
+
+```text
+https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bilibili-adblock.sgmodule
+```
 
 
 ## License

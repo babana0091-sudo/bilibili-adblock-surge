@@ -1,9 +1,9 @@
 #!name=哔哩哔哩去广告（融合增强）
-#!desc=Surge 网络 MITM：常规/暂停/小游戏/短剧广告 + 可选自动签到。v1.1.2 不再整域拦截 cm.bilibili.com，避免短视频评论广告组件卡死。
+#!desc=Surge 网络 MITM：常规/暂停/小游戏/短剧广告 + 可选自动签到。v1.1.4（等同 1.1.2）：不整域拦截 cm.bilibili.com；无 cm Map Local 空返回。
 #!author=babana0091-sudo
 #!homepage=https://github.com/babana0091-sudo/bilibili-adblock-surge
 #!category=去广告
-#!version=1.1.2
+#!version=1.1.4
 #!arguments=常规广告:true,暂停广告:true,小游戏广告:true,短剧广告:true,自动签到:true,银瓜子换硬币:false,调试日志:false
 #!arguments-desc=常规广告: 开屏、推荐 Banner、信息流、搜索、直播/番剧页等基础广告\n默认开启\n\n暂停广告: 播放暂停时的暂停页/框下商业卡（网络层可拦截部分）\n默认开启\n\n小游戏广告: 小游戏广告位、IAA、直播小游戏物料、游戏推广卡\n默认开启\n\n短剧广告: Story 竖屏流广告与短剧/playlet 推广\n默认开启\n\n自动签到: 打开 App 自动抓 Cookie，每天定时直播签到/查经验/尝试大会员福利\n默认开启\n\n银瓜子换硬币: 签到时是否尝试银瓜子换硬币\n默认关闭\n\n调试日志: 脚本调试日志\n默认关闭
 

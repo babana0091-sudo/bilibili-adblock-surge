@@ -55,40 +55,52 @@ const method = $request.method;
 if (method !== 'POST') {
   console.log('[BiliAD][proto] non-POST', method);
 }
-let headers = $response.headers || {};
-const isQuanX = typeof $task !== 'undefined';
-const binaryBody = isQuanX ? new Uint8Array($response.bodyBytes) : $response.body;
-let gzipStrName = 'grpc-encoding';
-if (!headers[gzipStrName]) {
-  console.log('[BiliAD][proto] header capitalised');
-  gzipStrName = 'Grpc-Encoding';
-}
-const isGzipCompress = headers[gzipStrName] === 'gzip';
-const unGzipBody = isGzipCompress ? pako.ungzip(binaryBody.slice(5)) : binaryBody.slice(5);
-headers[gzipStrName] = 'identity';
-if (headers['content-encoding']) headers['content-encoding'] = 'identity';
-if (headers['Content-Encoding']) headers['Content-Encoding'] = 'identity';
 
-function processNewBody(raw) {
-  const length = raw.length;
-  let merge = new Uint8Array(5 + length);
-  merge.set(intToUint8Array(length), 1);
-  merge.set(raw, 5);
-  return merge;
-}
-function intToUint8Array(num) {
-  let arr = new ArrayBuffer(4);
-  let view = new DataView(arr);
-  view.setUint32(0, num, false);
-  return new Uint8Array(arr);
-}
+// Exact path ends: do NOT match ViewProgress (old "View" prefix wrongly matched it).
+const isViewAdPath =
+  /viewunite\.v1\.View\/(?:View|TFInfo|RelatesFeed|PlayPause)(?:\?|$)/i.test(url) ||
+  /app\.view\.v1\.View\/View(?:\?|$)/i.test(url);
+const isDynPath = /dynamic\.v2\.Dynamic\/Dyn(?:All|Video)(?:\?|$)/i.test(url);
+const needViewStrip = isViewAdPath && (opts.常规广告 || opts.暂停广告 || opts.短剧广告);
+const needDynStrip = isDynPath && opts.常规广告;
 
-let body = binaryBody;
-try {
-  // View / ViewUnite / PlayPause: strip commercial source content
-  // Covers under-player / pause-related commercial cards in many app builds.
-  if (/viewunite\.v1\.View\/(View|TFInfo|RelatesFeed|PlayPause)/i.test(url) || /app\.view\.v1\.View\/View/i.test(url)) {
-    if (opts.常规广告 || opts.暂停广告 || opts.短剧广告) {
+// All rewrite flags off OR path not targeted: true pass-through (do not touch headers/body).
+// Critical bug before: headers were forced to grpc-encoding=identity even when body stayed gzip.
+if (!needViewStrip && !needDynStrip) {
+  if (opts.调试日志) console.log('[BiliAD][proto] pass-through', url);
+  $done({});
+} else {
+  let headers = $response.headers || {};
+  const isQuanX = typeof $task !== 'undefined';
+  const binaryBody = isQuanX ? new Uint8Array($response.bodyBytes) : $response.body;
+  let gzipStrName = 'grpc-encoding';
+  if (!headers[gzipStrName]) {
+    console.log('[BiliAD][proto] header capitalised');
+    gzipStrName = 'Grpc-Encoding';
+  }
+  const isGzipCompress = headers[gzipStrName] === 'gzip';
+  const unGzipBody = isGzipCompress ? pako.ungzip(binaryBody.slice(5)) : binaryBody.slice(5);
+  headers[gzipStrName] = 'identity';
+  if (headers['content-encoding']) headers['content-encoding'] = 'identity';
+  if (headers['Content-Encoding']) headers['Content-Encoding'] = 'identity';
+
+  function processNewBody(raw) {
+    const length = raw.length;
+    let merge = new Uint8Array(5 + length);
+    merge.set(intToUint8Array(length), 1);
+    merge.set(raw, 5);
+    return merge;
+  }
+  function intToUint8Array(num) {
+    let arr = new ArrayBuffer(4);
+    let view = new DataView(arr);
+    view.setUint32(0, num, false);
+    return new Uint8Array(arr);
+  }
+
+  let body = binaryBody;
+  try {
+    if (needViewStrip) {
       const viewReplyObj = ViewReply.fromBinary(unGzipBody, { readUnknownField: true });
       if (viewReplyObj.cm?.sourceContent?.length) {
         console.log('[BiliAD][proto] clear cm.sourceContent');
@@ -100,9 +112,7 @@ try {
         });
       }
       body = processNewBody(ViewReply.toBinary(viewReplyObj));
-    }
-  } else if (/dynamic\.v2\.Dynamic\/Dyn(All|Video)/i.test(url)) {
-    if (opts.常规广告) {
+    } else if (needDynStrip) {
       const dynAllReplyObj = DynAllReply.fromBinary(unGzipBody, { readUnknownField: true });
       if (dynAllReplyObj.upList) {
         dynAllReplyObj.upList = null;
@@ -110,20 +120,17 @@ try {
       }
       body = processNewBody(DynAllReply.toBinary(dynAllReplyObj));
     }
-  } else {
-    if (opts.调试日志) console.log('[BiliAD][proto] pass-through', url);
+  } catch (e) {
+    console.log('[BiliAD][proto] error', e);
     body = binaryBody;
   }
-} catch (e) {
-  console.log('[BiliAD][proto] error', e);
-  body = binaryBody;
-}
 
-if (isQuanX) {
-  $done({
-    bodyBytes: body.buffer.slice(body.byteOffset, body.byteLength + body.byteOffset),
-    headers,
-  });
-} else {
-  $done({ body, headers });
+  if (isQuanX) {
+    $done({
+      bodyBytes: body.buffer.slice(body.byteOffset, body.byteLength + body.byteOffset),
+      headers,
+    });
+  } else {
+    $done({ body, headers });
+  }
 }

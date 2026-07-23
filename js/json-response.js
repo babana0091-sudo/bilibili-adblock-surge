@@ -299,7 +299,10 @@ const opts = parseArgs(typeof $argument !== "undefined" ? $argument : "");
 const url = ($request && $request.url) || "";
 log(opts.调试日志, "url=", url);
 
-if (!$response || $response.body == null) {
+// All ad toggles off: true pass-through (no parse/re-stringify).
+if (!opts.常规广告 && !opts.暂停广告 && !opts.小游戏广告 && !opts.短剧广告) {
+  $done({});
+} else if (!$response || $response.body == null) {
   $done({});
 } else {
   let bodyText = $response.body;
@@ -346,32 +349,21 @@ if (!$response || $response.body == null) {
     else if (/x\/v2\/banner/i.test(url)) body = handleBanner(body, opts);
     else if (/x\/web-interface\/wbi\/index\/top\/feed\/rcmd/i.test(url))
       body = handleFeed(body, opts, url);
-    else body = cleanObject(body, opts);
-
-    // pause-ad related json endpoints (defensive)
-    if (
-      opts.暂停广告 &&
-      /pause|under_?player|underframe|paused?_?page/i.test(url)
-    ) {
-      if (body && body.data && typeof body.data === "object") {
-        body.data = Array.isArray(body.data) ? [] : {};
-      }
-    }
-    // mini game advertising endpoints
-    if (
-      opts.小游戏广告 &&
-      /advertising_position|iaa_ad_style|miniapp\/.*\/ad\//i.test(url)
-    ) {
-      body = {
-        code: 0,
-        message: "0",
-        ttl: 1,
-        data: Array.isArray(body && body.data) ? [] : {},
-      };
+    else {
+      // unmatched: do not deep-clean
+      $done({});
+      return;
     }
   } catch (e) {
     log(opts.调试日志, "handle error", e);
+    $done({});
+    return;
   }
 
-  $done({ body: JSON.stringify(body) });
+  try {
+    $done({ body: JSON.stringify(body) });
+  } catch (e) {
+    log(opts.调试日志, "stringify fail", e);
+    $done({});
+  }
 }

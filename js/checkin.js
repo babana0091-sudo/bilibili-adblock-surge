@@ -398,7 +398,7 @@ async function captureCookie(opts) {
   const cookie = getHeader(headers, "Cookie") || getHeader(headers, "cookie");
   const auth = getHeader(headers, "Authorization") || "";
   const store = readStore();
-  let changed = false;
+  let sessionChanged = false;
   let gotCookie = false;
   let gotToken = false;
   let tokenFromReq = "";
@@ -408,14 +408,17 @@ async function captureCookie(opts) {
     if (store.cookie !== cookie) {
       store.cookie = cookie;
       store.cookieUpdatedAt = new Date().toISOString();
-      changed = true;
+      sessionChanged = true;
     }
     const m = cookieMap(cookie);
     if (m.bili_jct) store.csrf = m.bili_jct;
-    if (m.DedeUserID) store.uid = m.DedeUserID;
+    if (m.DedeUserID && store.uid !== m.DedeUserID) {
+      store.uid = m.DedeUserID;
+      sessionChanged = true;
+    }
   }
 
-  // App token: URL access_key → store.bili_app_token (renamed to re-trigger notify)
+  // App token: URL access_key → store.bili_app_token
   try {
     const u = new URL(url);
     const ak = u.searchParams.get("access_key");
@@ -425,10 +428,7 @@ async function captureCookie(opts) {
       if (store.bili_app_token !== ak) {
         store.bili_app_token = ak;
         store.biliAppTokenUpdatedAt = new Date().toISOString();
-        changed = true;
-      } else {
-        // same token still counts as session present on this request
-        store.bili_app_token = ak;
+        sessionChanged = true;
       }
     }
   } catch (e) {}
@@ -445,44 +445,50 @@ async function captureCookie(opts) {
           if (store.bili_app_token !== ak) {
             store.bili_app_token = ak;
             store.biliAppTokenUpdatedAt = new Date().toISOString();
-            changed = true;
+            sessionChanged = true;
           }
         }
       }
     }
   } catch (e) {}
 
-  if (auth && auth.length > 10) store.authorization = auth;
+  if (auth && auth.length > 10 && store.authorization !== auth) {
+    store.authorization = auth;
+  }
   const mid = getHeader(headers, "x-bili-mid") || getHeader(headers, "X-Bili-Mid");
-  if (mid) store.uid = String(mid);
+  if (mid && String(store.uid || "") !== String(mid)) {
+    store.uid = String(mid);
+    // mid alone does not count as session change for notify spam
+  }
 
-  if (gotCookie || gotToken || changed) writeStore(store);
+  // Always persist silent token/cookie refresh without notify when unchanged
+  if (gotCookie || gotToken || sessionChanged) writeStore(store);
 
   log(
     "capture done",
     "cookie=" + (gotCookie ? "yes" : "no"),
     "bili_app_token=" + (store.bili_app_token ? "yes" : "no"),
-    "gotToken=" + gotToken,
-    "changed=" + changed,
+    "sessionChanged=" + sessionChanged,
     "url=" + String(url).slice(0, 90)
   );
 
-  // Notify if this request carried session, throttle 90s (avoid feed storm spam)
-  const hasSession = !!(
-    (store.cookie && String(store.cookie).includes("SESSDATA")) ||
-    (store.bili_app_token && String(store.bili_app_token).length > 8)
-  );
-  const lastN = store.sessionNotifyAt ? Date.parse(store.sessionNotifyAt) : 0;
-  const throttleOk = !lastN || Date.now() - lastN > 90 * 1000;
-  const shouldNotify = hasSession && (gotToken || gotCookie) && (changed || throttleOk);
-
-  if (!shouldNotify) {
-    if (hasSession) log("capture notify skip (throttle or no token on this req)");
+  // ONLY notify when session credentials actually change (new/rotated token or cookie).
+  // Same access_key on feed/splash/fingerprint must NOT popup again.
+  if (!sessionChanged) {
     $done({});
     return;
   }
 
-  // VIP query with hard budget so we ALWAYS reach notify (timeout was killing popup)
+  const hasSession = !!(
+    (store.cookie && String(store.cookie).includes("SESSDATA")) ||
+    (store.bili_app_token && String(store.bili_app_token).length > 8)
+  );
+  if (!hasSession) {
+    $done({});
+    return;
+  }
+
+  // VIP only when we will notify (session really changed)
   let vipLine = "会员: 查询失败";
   try {
     const hdrs = buildAuthHeaders(store);
@@ -545,7 +551,7 @@ async function captureCookie(opts) {
   );
   parts.push("登录态已保存");
   notify(NAME, "登录态已捕获", parts.join("\n"));
-  log("session notify", parts.join(" | "));
+  log("session notify (credentials changed)", parts.join(" | "));
   $done({});
 }
 

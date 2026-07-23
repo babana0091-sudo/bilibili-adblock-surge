@@ -109,7 +109,8 @@ def main() -> int:
             )
             continue
 
-        rest = path[len(RAW_PREFIX) :]  # e.g. main/js/checkin.js
+        rest = path[len(RAW_PREFIX) :]  # e.g. main/js/checkin.js or .../js/x.js?v=1
+        rest = rest.split("?", 1)[0]
         parts = rest.split("/")
         if len(parts) < 3 or parts[1] != "js":
             errors.append(f"unexpected raw path shape: {path}")

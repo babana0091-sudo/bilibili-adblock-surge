@@ -1,10 +1,10 @@
 #!name=哔哩哔哩去广告（融合增强）
-#!desc=Surge 网络 MITM：常规/暂停/小游戏/短剧广告 + 可选自动签到。v1.1.9：拦截 Gaia 风控设备上报；搜索主链路不再空返回 square/recommend_words。
+#!desc=Surge 网络 MITM：常规/暂停/小游戏/短剧广告 + 可选自动签到。v1.2.0：Gaia 风控改为请求侧硬拦截（不打后端），并增加「拦截风控上报」开关。
 #!author=babana0091-sudo
 #!homepage=https://github.com/babana0091-sudo/bilibili-adblock-surge
 #!category=去广告
-#!version=1.1.9
-#!arguments=常规广告:true,暂停广告:true,小游戏广告:true,短剧广告:true,自动签到:true,银瓜子换硬币:false,调试日志:false
+#!version=1.2.0
+#!arguments=常规广告:true,暂停广告:true,小游戏广告:true,短剧广告:true,自动签到:true,银瓜子换硬币:false,拦截风控上报:true,调试日志:false
 #!arguments-desc=常规广告: 开屏、推荐 Banner、信息流、搜索、直播/番剧页等基础广告\n默认开启\n\n暂停广告: 播放暂停时的暂停页/框下商业卡（网络层可拦截部分）\n默认开启\n\n小游戏广告: 小游戏广告位、IAA、直播小游戏物料、游戏推广卡\n默认开启\n\n短剧广告: Story 竖屏流广告与短剧/playlet 推广\n默认开启\n\n自动签到: 打开 App 自动抓 Cookie，每天定时直播签到/查经验/尝试大会员福利\n默认开启\n\n银瓜子换硬币: 签到时是否尝试银瓜子换硬币\n默认关闭\n\n调试日志: 脚本调试日志\n默认关闭
 
 [Rule]
@@ -15,10 +15,6 @@ URL-REGEX,"^http:\/\/upos-sz-static\.bilivideo\.com\/ssaxcode\/\w{2}\/\w{2}\/\w{
 URL-REGEX,"^http:\/\/[\d\.]+:8000\/v1\/resource\/\w{32}-1-SPLASH",REJECT-TINYGIF
 
 [Map Local]
-# ===== Gaia 风控设备上报：返回空成功，阻断环境/代理指纹上传 =====
-# ExClimbKunLun / ExClimbCongLing = 设备信息上报
-# ExBadBasket = 异常环境/代理相关上报（IPA 中与 kCFProxyTypeNone、jailbreak 痕迹同区）
-# 注意：这里返回 200+空 JSON，避免 hard REJECT 触发客户端无限重试
 ^https?:\/\/api\.bilibili\.com\/x\/internal\/gaia-gateway\/ExClimbKunLun data-type=text data="{}" status-code=200 header="Content-Type: application/json"
 ^https?:\/\/api\.bilibili\.com\/x\/internal\/gaia-gateway\/ExClimbCongLing data-type=text data="{}" status-code=200 header="Content-Type: application/json"
 ^https?:\/\/api\.bilibili\.com\/x\/internal\/gaia-gateway\/ExBadBasket data-type=text data="{}" status-code=200 header="Content-Type: application/json"
@@ -50,6 +46,9 @@ bili-live-json = type=http-response,pattern=^https?:\/\/api\.live\.bilibili\.com
 bili-game-json = type=http-response,pattern=^https?:\/\/(?:line\d?-h5-mobile-api\.biligame\.com|miniapp\.bilibili\.com)\/.*(?:advertising_position|iaa_ad_style|\/ad\/position|client\/ad),requires-body=1,max-size=-1,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/json-response.js,argument=常规广告={{{常规广告}}}&暂停广告={{{暂停广告}}}&小游戏广告={{{小游戏广告}}}&短剧广告={{{短剧广告}}}&调试日志={{{调试日志}}},script-update-interval=0
 # 播放页 protobuf 改写保留（用户要求非 cm 问题后已还原）；若详情骨架屏再议
 bili-proto = type=http-response,pattern=^https?:\/\/(?:grpc\.biliapi\.net|app\.bilibili\.com)\/bilibili\.(?:app\.(?:viewunite\.v1\.View\/(?:View|TFInfo|RelatesFeed|PlayPause)|view\.v1\.View\/View|dynamic\.v2\.Dynamic\/Dyn(?:All|Video))),requires-body=1,binary-body-mode=1,max-size=-1,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/proto-response.js,argument=常规广告={{{常规广告}}}&暂停广告={{{暂停广告}}}&小游戏广告={{{小游戏广告}}}&短剧广告={{{短剧广告}}}&调试日志={{{调试日志}}},script-update-interval=0
+
+# Gaia 风控上报：http-request 硬拦截（不访问后端）。可用「拦截风控上报」开关关闭。
+bili-gaia-block = type=http-request,pattern=^https?:\/\/api\.bilibili\.com\/x\/internal\/gaia-gateway\/(?:ExClimbKunLun|ExClimbCongLing|ExBadBasket),script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/gaia-block.js,requires-body=0,argument=拦截风控上报={{{拦截风控上报}}}&调试日志={{{调试日志}}},script-update-interval=0
 
 # 自动签到：打开 App 抓 Cookie + 每天 7:30 执行
 bili-checkin-capture = type=http-request,pattern=^https?:\/\/app\.bilibili\.com\/x\/resource\/fingerprint\?,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/checkin.js,requires-body=0,argument=自动签到={{{自动签到}}}&银瓜子换硬币={{{银瓜子换硬币}}}&调试日志={{{调试日志}}},script-update-interval=0

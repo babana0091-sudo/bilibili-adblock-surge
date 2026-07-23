@@ -17,7 +17,7 @@
 // Storage key: bili_adblock_checkin
 
 const STORE_KEY = "bili_adblock_checkin";
-const SCRIPT_VERSION = "2.0.4";
+const SCRIPT_VERSION = "2.0.5";
 const NAME = "哔哩签到";
 
 function parseArgs(raw) {
@@ -116,15 +116,17 @@ function cookieMap(cookie) {
   return o;
 }
 
-async function detectVipStatus(baseHeaders) {
+async function detectVipStatus(baseHeaders, accessKey) {
   // Prefer nav (vipStatus/vipType); fallback vip/web/user/info
   // Returns { isVip: boolean, detail: string }
+  accessKey = accessKey || "";
+  const navUrl =
+    "https://api.bilibili.com/x/web-interface/nav" +
+    (accessKey && !(baseHeaders && baseHeaders.Cookie)
+      ? "?access_key=" + encodeURIComponent(accessKey)
+      : "");
   try {
-    const r = await http(
-      "GET",
-      "https://api.bilibili.com/x/web-interface/nav",
-      baseHeaders
-    );
+    const r = await http("GET", navUrl, baseHeaders);
     const j = JSON.parse(r.data || "{}");
     if (j.code === 0 && j.data) {
       const d = j.data;
@@ -234,7 +236,8 @@ async function probeVipIfSession(opts, reason, force) {
     return { isVip: !!store.isVip, detail: store.vipDetail || "cached", cached: true };
   }
 
-  const vip = await detectVipStatus(buildAuthHeaders(store));
+  const hdrs = buildAuthHeaders(store);
+  const vip = await detectVipStatus(hdrs, store.access_key || "");
   store.vipCheckedAt = new Date().toISOString();
   store.vipProbeDay = day;
   store.vipProbeReason = reason || "";
@@ -331,6 +334,9 @@ function isCheckinHourBeijing() {
 
 async function captureCookie(opts) {
   opts = opts || parseArgs(typeof $argument !== "undefined" ? $argument : "");
+  // CRITICAL: http-request on app.bilibili.com must return ASAP.
+  // Never await VIP/network here — it can stall the shared H2 connection
+  // and contribute to feed/index empty responses (inBytes=0).
   if (!opts.自动签到) {
     log("capture skip: checkin=false");
     $done({});
@@ -342,8 +348,11 @@ async function captureCookie(opts) {
   const auth = getHeader(headers, "Authorization") || "";
   const store = readStore();
   let changed = false;
+  let gotCookie = false;
+  let gotAccessKey = false;
 
   if (cookie && cookie.includes("SESSDATA")) {
+    gotCookie = true;
     if (store.cookie !== cookie) {
       store.cookie = cookie;
       store.cookieUpdatedAt = new Date().toISOString();
@@ -354,13 +363,30 @@ async function captureCookie(opts) {
     if (m.DedeUserID) store.uid = m.DedeUserID;
   }
 
-  // access_key sometimes appears in query
+  // App requests often have NO Cookie header; session is access_key in query.
   try {
     const u = new URL(url);
     const ak = u.searchParams.get("access_key");
-    if (ak && store.access_key !== ak) {
-      store.access_key = ak;
-      changed = true;
+    if (ak && ak.length > 8) {
+      gotAccessKey = true;
+      if (store.access_key !== ak) {
+        store.access_key = ak;
+        store.accessKeyUpdatedAt = new Date().toISOString();
+        changed = true;
+      }
+    }
+  } catch (e) {}
+
+  // Also accept access_key from body if present (rare)
+  try {
+    const body = ($request && $request.body) || "";
+    if (typeof body === "string" && body.includes("access_key=")) {
+      const m = body.match(/access_key=([^&]+)/);
+      if (m && m[1] && store.access_key !== m[1]) {
+        store.access_key = decodeURIComponent(m[1]);
+        gotAccessKey = true;
+        changed = true;
+      }
     }
   } catch (e) {}
 
@@ -368,50 +394,64 @@ async function captureCookie(opts) {
     store.authorization = auth;
   }
 
-  // Session 存在：先查会员（日志 + 供通知展示），再发 Cookie 通知
-  let vipInfo = null;
-  if (store.cookie && String(store.cookie).includes("SESSDATA")) {
-    try {
-      vipInfo = await probeVipIfSession(
-        opts,
-        changed ? "session-ready" : "session-exists",
-        !!changed
-      );
-    } catch (e) {
-      log("vip probe on capture err", e);
-    }
+  // mid header as weak uid hint
+  const mid = getHeader(headers, "x-bili-mid") || getHeader(headers, "X-Bili-Mid");
+  if (mid && !store.uid) store.uid = String(mid);
+
+  if (changed || gotCookie || gotAccessKey) {
+    writeStore(store);
   }
 
-  if (changed) {
-    writeStore(store);
-    // 通知里带上会员状态（查不到则写未知）
-    let vipLine = "会员状态: 未知";
-    if (vipInfo && vipInfo.cached && store.isVip != null) {
-      vipLine = store.isVip ? "会员状态: 大会员" : "会员状态: 非大会员";
-    } else if (vipInfo && vipInfo.isVip === true) {
-      vipLine = "会员状态: 大会员";
-    } else if (vipInfo && vipInfo.isVip === false) {
-      vipLine = "会员状态: 非大会员";
-    } else if (store.isVip === true) {
-      vipLine = "会员状态: 大会员";
-    } else if (store.isVip === false) {
-      vipLine = "会员状态: 非大会员";
-    }
+  log(
+    "capture done",
+    "cookie=" + (gotCookie ? "yes" : "no"),
+    "access_key=" + (store.access_key ? "yes" : "no"),
+    "changed=" + changed,
+    "url=" + url.slice(0, 80)
+  );
+
+  // Notify only when we first get a usable session token (cookie OR access_key).
+  // VIP probe is NOT done here (async elsewhere) so we don't block app traffic.
+  if (changed && (gotCookie || gotAccessKey)) {
+    const kind = gotCookie ? "Cookie" : "access_key";
     const uid = store.uid ? "UID " + store.uid : "";
+    const vipHint =
+      store.isVip === true
+        ? "会员状态: 大会员(缓存)"
+        : store.isVip === false
+          ? "会员状态: 非大会员(缓存)"
+          : "会员状态: 待检测(定时任务)";
     notify(
       NAME,
-      "Cookie / Session 已更新",
-      [uid, vipLine, "将用于每日自动签到"].filter(Boolean).join("\n")
+      kind + " / Session 已更新",
+      [uid, vipHint, "签到将用 access_key 或 Cookie"].filter(Boolean).join("\n")
     );
-    log("cookie updated", store.uid || "", vipLine);
   }
+
+  // Always release the request immediately
   $done({});
 }
 
 async function doCheckin(opts) {
   const store = readStore();
-  if (!store.cookie) {
-    notify(NAME, "未捕获 Cookie", "请打开哔哩哔哩 App 首页一次以自动抓取");
+  const hasCookie = !!(store.cookie && String(store.cookie).includes("SESSDATA"));
+  const hasAK = !!(store.access_key && String(store.access_key).length > 8);
+  if (!hasCookie && !hasAK) {
+    // Throttle "no session" notifications: at most once per 6 hours
+    const lastN = store.lastNoSessionNotifyAt
+      ? Date.parse(store.lastNoSessionNotifyAt)
+      : 0;
+    if (!lastN || Date.now() - lastN > 6 * 3600 * 1000) {
+      store.lastNoSessionNotifyAt = new Date().toISOString();
+      writeStore(store);
+      notify(
+        NAME,
+        "未捕获登录态",
+        "App 请求常无 Cookie，请打开 B 站首页一次以抓取 access_key；或登录态失效请重新登录"
+      );
+    } else {
+      log("no session, notify throttled");
+    }
     $done({});
     return;
   }
@@ -421,8 +461,7 @@ async function doCheckin(opts) {
     return;
   }
 
-  // Session 存在 + cron/任务被拉起：先额外做一次会员检测（仅日志，节流）
-  // 不依赖是否处于 0/10/19/21 签到窗
+  // Session 存在 + cron 拉起：会员检测（仅日志，节流）— 不在 http-request 路径
   try {
     await probeVipIfSession(opts, "cron-start", false);
   } catch (e) {
@@ -463,18 +502,20 @@ async function doCheckin(opts) {
     return;
   }
 
-  const cookie = store.cookie;
+  const cookie = store.cookie || "";
   const csrf = store.csrf || cookieMap(cookie).bili_jct || "";
+  const accessKey = store.access_key || "";
   const baseHeaders = {
-    Cookie: cookie,
     "User-Agent":
       "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BiliApp",
     Referer: "https://www.bilibili.com/",
     Origin: "https://www.bilibili.com",
   };
+  if (cookie) baseHeaders.Cookie = cookie;
 
   // 大会员判断：只写日志，不弹窗；非会员整次签到跳过
-  const vip = await detectVipStatus(baseHeaders);
+  // Prefer cookie; if only access_key, still try nav with access_key query via detect
+  const vip = await detectVipStatus(baseHeaders, accessKey);
   store.vipCheckedAt = new Date().toISOString();
   store.isVip = !!vip.isVip;
   store.vipDetail = vip.detail || "";
@@ -491,11 +532,15 @@ async function doCheckin(opts) {
 
   // 1) Live sign
   try {
-    const r = await http(
-      "GET",
-      "https://api.live.bilibili.com/xlive/web-ucenter/v1/sign/DoSign",
-      baseHeaders
-    );
+    let signUrl =
+      "https://api.live.bilibili.com/xlive/web-ucenter/v1/sign/DoSign";
+    if (accessKey) {
+      signUrl +=
+        (signUrl.indexOf("?") >= 0 ? "&" : "?") +
+        "access_key=" +
+        encodeURIComponent(accessKey);
+    }
+    const r = await http("GET", signUrl, baseHeaders);
     const j = JSON.parse(r.data || "{}");
     if (j.code === 0) {
       okAny = true;
@@ -661,7 +706,10 @@ async function doCheckin(opts) {
       ? String($script.name)
       : "";
   const store0 = readStore();
-  const hasSession = !!(store0.cookie && String(store0.cookie).includes("SESSDATA"));
+  const hasSession = !!(
+    (store0.cookie && String(store0.cookie).includes("SESSDATA")) ||
+    (store0.access_key && String(store0.access_key).length > 8)
+  );
   // 任何触发都必须先打这条，方便在 Surge 日志里确认脚本真的跑了
   log(
     "boot",

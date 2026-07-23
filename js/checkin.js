@@ -1,12 +1,17 @@
 // Bilibili daily check-in for Surge (network only)
 // - type=http-request on fingerprint: capture Cookie / access_key
-// - type=cron: run daily tasks with stored credentials
+// - type=cron: hourly tick; only act at Beijing 00/10/19/21
+//   Day key + slots use Asia/Shanghai (UTC+8), not device local TZ.
+//   First success of that Beijing day marks lastRunOk; later slots no-op.
 //
-// Tasks (best-effort, API may change):
+// Tasks (VIP only; non-VIP skipped with log only, no notification):
+// 0) detect VIP via x/web-interface/nav (fallback x/vip/web/user/info)
 // 1) live DoSign
-// 2) exp/reward status
-// 3) vip privilege receive (monthly B-coin coupon if eligible)
-// 4) silver2coin (optional)
+// 2) 大积分签到 POST /pgc/activity/score/task/sign
+// 3) exp/reward status
+// 4) vip privilege receive (optional)
+// 5) silver2coin (optional)
+// Random delay before tasks to avoid整点风控
 //
 // Storage key: bili_adblock_checkin
 
@@ -109,6 +114,63 @@ function cookieMap(cookie) {
   return o;
 }
 
+async function detectVipStatus(baseHeaders) {
+  // Prefer nav (vipStatus/vipType); fallback vip/web/user/info
+  // Returns { isVip: boolean, detail: string }
+  try {
+    const r = await http(
+      "GET",
+      "https://api.bilibili.com/x/web-interface/nav",
+      baseHeaders
+    );
+    const j = JSON.parse(r.data || "{}");
+    if (j.code === 0 && j.data) {
+      const d = j.data;
+      const vip = d.vip || {};
+      const status = vip.status != null ? vip.status : d.vipStatus;
+      const type = vip.type != null ? vip.type : d.vipType;
+      const due = vip.due_date || vip.dueDate || d.vipDueDate || 0;
+      // status===1 大会员有效；type 1/2 月度/年度等
+      const isVip = status === 1 || status === true || (type > 0 && status !== 0);
+      const detail =
+        "nav vipStatus=" +
+        status +
+        " vipType=" +
+        type +
+        " due=" +
+        due +
+        " isLogin=" +
+        !!d.isLogin;
+      return { isVip: !!isVip, detail: detail };
+    }
+    log("nav vip code", j.code, j.message || j.msg || "");
+  } catch (e) {
+    log("nav vip err", e);
+  }
+  try {
+    const r = await http(
+      "GET",
+      "https://api.bilibili.com/x/vip/web/user/info",
+      baseHeaders
+    );
+    const j = JSON.parse(r.data || "{}");
+    if (j.code === 0 && j.data) {
+      const d = j.data;
+      const status = d.vip_status != null ? d.vip_status : d.status;
+      const type = d.vip_type != null ? d.vip_type : d.type;
+      const isVip = status === 1 || (type > 0 && status !== 0);
+      return {
+        isVip: !!isVip,
+        detail: "vip/web/user/info status=" + status + " type=" + type,
+      };
+    }
+    log("vip info code", j.code, j.message || j.msg || "");
+  } catch (e) {
+    log("vip info err", e);
+  }
+  return { isVip: false, detail: "detect failed / not vip" };
+}
+
 function http(method, url, headers, body) {
   return new Promise((resolve) => {
     const opt = { url, headers: headers || {}, timeout: 15 };
@@ -130,10 +192,63 @@ function http(method, url, headers, body) {
   });
 }
 
+// Force Asia/Shanghai (UTC+8) for day key and hour slots.
+function beijingParts(date) {
+  const d = date || new Date();
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    const map = {};
+    fmt.formatToParts(d).forEach((x) => {
+      if (x.type !== "literal") map[x.type] = x.value;
+    });
+    // hour "24" -> 0 on some engines at midnight
+    let hour = parseInt(map.hour, 10);
+    if (hour === 24) hour = 0;
+    return {
+      day: map.year + "-" + map.month + "-" + map.day,
+      hour: hour,
+      minute: parseInt(map.minute, 10) || 0,
+    };
+  } catch (e) {
+    // Fallback: UTC + 8h wall clock
+    const utc = d.getTime() + d.getTimezoneOffset() * 60000;
+    const bj = new Date(utc + 8 * 3600000);
+    const p = (n) => (n < 10 ? "0" + n : "" + n);
+    return {
+      day: bj.getFullYear() + "-" + p(bj.getMonth() + 1) + "-" + p(bj.getDate()),
+      hour: bj.getHours(),
+      minute: bj.getMinutes(),
+    };
+  }
+}
+
 function today() {
-  const d = new Date();
-  const p = (n) => (n < 10 ? "0" + n : "" + n);
-  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+  return beijingParts().day;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Random delay 45s–8min to avoid on-the-hour bursts. */
+function randomCheckinDelayMs() {
+  const min = 45 * 1000;
+  const max = 8 * 60 * 1000;
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+const CHECKIN_HOURS_BJ = [0, 10, 19, 21];
+
+function isCheckinHourBeijing() {
+  return CHECKIN_HOURS_BJ.indexOf(beijingParts().hour) >= 0;
 }
 
 async function captureCookie(opts) {
@@ -195,10 +310,38 @@ async function doCheckin(opts) {
     return;
   }
 
-  const day = today();
+  // Beijing calendar day + hour slots (not device local TZ).
+  if (!isCheckinHourBeijing()) {
+    log("skip: not Beijing check-in hour", beijingParts());
+    $done({});
+    return;
+  }
+
+  const day = today(); // Asia/Shanghai YYYY-MM-DD
+  // Same Beijing day + already succeeded: skip remaining 0/10/19/21 slots.
+  // Next Beijing midnight: day string changes => runs again (once per BJ day, not forever).
   if (store.lastRunDay === day && store.lastRunOk) {
-    log("already ran today");
-    // still allow rerun silently without spam
+    log("already succeeded Beijing day, skip slot", day);
+    $done({});
+    return;
+  }
+
+  // Avoid整点批量：北京时间时段内再随机延迟一段时间
+  const delayMs = randomCheckinDelayMs();
+  log("random delay ms", delayMs, "bj", beijingParts());
+  await sleep(delayMs);
+
+  // Re-check after delay: day/hour may have changed; still only act in slot hours
+  if (!isCheckinHourBeijing()) {
+    log("after delay: left check-in hour, skip", beijingParts());
+    $done({});
+    return;
+  }
+  const dayAfter = today();
+  if (store.lastRunDay === dayAfter && store.lastRunOk) {
+    log("after delay: already succeeded", dayAfter);
+    $done({});
+    return;
   }
 
   const cookie = store.cookie;
@@ -210,6 +353,19 @@ async function doCheckin(opts) {
     Referer: "https://www.bilibili.com/",
     Origin: "https://www.bilibili.com",
   };
+
+  // 大会员判断：只写日志，不弹窗；非会员整次签到跳过
+  const vip = await detectVipStatus(baseHeaders);
+  store.vipCheckedAt = new Date().toISOString();
+  store.isVip = !!vip.isVip;
+  store.vipDetail = vip.detail || "";
+  writeStore(store);
+  log("vip detect:", vip.isVip ? "YES" : "NO", vip.detail || "");
+  if (!vip.isVip) {
+    log("skip checkin: not VIP (no notification)");
+    $done({});
+    return;
+  }
 
   const lines = [];
   let okAny = false;
@@ -240,7 +396,58 @@ async function doCheckin(opts) {
     lines.push("直播签到: 异常 " + e);
   }
 
-  // 2) Exp reward status
+  // 2) VIP 大积分签到（大会员；非会员会失败，忽略）
+  // POST https://api.bilibili.com/pgc/activity/score/task/sign
+  try {
+    const headers = Object.assign({}, baseHeaders, {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Referer: "https://big.bilibili.com/",
+      Origin: "https://www.bilibili.com",
+    });
+    let body = "";
+    if (csrf) body = "csrf=" + encodeURIComponent(csrf);
+    if (store.access_key) {
+      body = (body ? body + "&" : "") + "access_key=" + encodeURIComponent(store.access_key);
+    }
+    const r = await http(
+      "POST",
+      "https://api.bilibili.com/pgc/activity/score/task/sign",
+      headers,
+      body
+    );
+    let j = {};
+    try {
+      j = JSON.parse(r.data || "{}");
+    } catch (e) {
+      j = {};
+    }
+    // 0 success; common already-signed codes vary — treat message hints as ok
+    const msg = String(j.message || j.msg || "");
+    if (j.code === 0) {
+      okAny = true;
+      lines.push("大积分签到: 成功");
+    } else if (
+      /已签|重复|already|今日已|签到过/i.test(msg) ||
+      j.code === 71000 ||
+      j.code === 6000002
+    ) {
+      okAny = true;
+      lines.push("大积分签到: 今日已签 (" + (j.code != null ? j.code : "") + ")");
+    } else if (j.code === -403 || j.code === 6001001 || /非大会员|不是大会员|权限不足|未开通/i.test(msg)) {
+      lines.push("大积分签到: 非会员/无权限，跳过");
+    } else {
+      lines.push(
+        "大积分签到: 失败 code=" +
+          (j.code != null ? j.code : r.status) +
+          " " +
+          msg
+      );
+    }
+  } catch (e) {
+    lines.push("大积分签到: 异常 " + e);
+  }
+
+  // 3) Exp reward status
   try {
     const r = await http(
       "GET",
@@ -262,7 +469,7 @@ async function doCheckin(opts) {
     lines.push("经验任务: 异常 " + e);
   }
 
-  // 3) VIP privilege receive (type=1 B-coin coupon) - monthly, ignore if not eligible
+  // 4) VIP privilege receive (type=1 B-coin coupon) - monthly, ignore if not eligible
   if (csrf) {
     try {
       const body = `type=1&csrf=${encodeURIComponent(csrf)}`;
@@ -287,7 +494,7 @@ async function doCheckin(opts) {
     }
   }
 
-  // 4) silver2coin optional
+  // 5) silver2coin optional
   if (opts.银瓜子换硬币 && csrf) {
     try {
       const body = `csrf_token=${encodeURIComponent(

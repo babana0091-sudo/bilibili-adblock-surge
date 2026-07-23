@@ -60,8 +60,114 @@ function log(enabled, ...args) {
   if (enabled) console.log("[BiliAD][json]", ...args);
 }
 
+
+/**
+ * 竖屏 Story 流「红果广告短剧」整卡识别。
+ *
+ * 从点击埋点 original_json 还原的推流 item 形态（猜测与 feed/index/story 一致）：
+ * {
+ *   goto: "vertical_av",          // 竖屏播放
+ *   card_goto: "ad_av",           // 广告 av 卡（普通视频多为 vertical_av）
+ *   card_type: "cm_v2",           // 商业卡类型
+ *   idx, title, desc, uri,
+ *   args: { up_id, up_name, aid },
+ *   player_args: { duration, aid, type:"av", cid },
+ *   three_point: { dislike_reasons: [...] },
+ *   // 推流里常见额外字段（埋点侧也有）：
+ *   // ad_info / ad_cb / is_ad / from_spmid / creative_id
+ *   // uri 常带 ad_story_extra、creative_id、from_spmid=ad.tianma...
+ * }
+ * 普通竖屏视频对照：card_goto/goto 多为 vertical_av，card_type 非 cm_v2，无 ad_info。
+ * 策略：整卡从 data.items 移除，而不是只去下载条。
+ */
+function isHongguoOrAdStory(item) {
+  if (!item || typeof item !== "object") return false;
+  const cardGoto = String(item.card_goto || "").toLowerCase();
+  const goto = String(item.goto || item.type || item.cardType || "").toLowerCase();
+  const cardType = String(item.card_type || item.cardType || "").toLowerCase();
+  const uri = String(
+    item.uri || item.link || item.jump_url || item.blink || item.route || ""
+  );
+  const title = String(
+    item.title || item.desc || item.subtitle || item.rcmd_reason || ""
+  );
+  const desc = String(item.desc || "");
+  const up = String(
+    (item.args && (item.args.up_name || item.args.rname)) ||
+      item.up_name ||
+      item.author_name ||
+      ""
+  );
+  const spmid = String(
+    item.from_spmid ||
+      item.spmid ||
+      (item.three_point_v2 && item.three_point_v2.spmid) ||
+      ""
+  );
+  const text = title + desc + up;
+  const blob = (
+    cardGoto +
+    " " +
+    goto +
+    " " +
+    cardType +
+    " " +
+    uri +
+    " " +
+    text +
+    " " +
+    spmid +
+    " " +
+    JSON.stringify(item.ad_info || {}) +
+    " " +
+    String(item.ad_story_extra || "") +
+    " " +
+    String(item.track_id || item.trackid || "")
+  ).toLowerCase();
+
+  // A. 红果文案 / UP（最稳）
+  if (/红果/.test(text + uri) || blob.includes("hongguo")) return true;
+  if (/免费短剧|海量短剧|热门短剧/.test(text)) return true;
+
+  // B. 天马广告位 spmid
+  if (spmid.includes("ad.tianma") || blob.includes("ad.tianma")) return true;
+
+  // C. 商业 cm 卡 + 竖屏 av（抓包：card_type=cm_v2 + goto=vertical_av）
+  if (
+    (cardType === "cm_v2" || cardType.startsWith("cm")) &&
+    (goto === "vertical_av" || cardGoto === "ad_av" || /story\//.test(uri))
+  ) {
+    return true;
+  }
+
+  // D. 明确广告 av 卡
+  if (cardGoto === "ad_av" || cardGoto.startsWith("ad_")) return true;
+  if (goto === "ad_av" || (goto.startsWith("ad_") && /av|story|vertical/.test(goto + uri)))
+    return true;
+
+  // E. uri 广告参数（ad_story_extra / creative_id + story）
+  if (
+    /ad_story_extra|creative_id=|from_spmid=ad\./i.test(uri) &&
+    (/story\//.test(uri) || goto === "vertical_av" || cardGoto.includes("ad"))
+  ) {
+    return true;
+  }
+
+  // F. 通用广告字段 + 短剧/竖屏特征
+  if (item.ad_info || item.ad_cb || item.is_ad || item.is_ad_loc) {
+    if (
+      /红果|短剧|playlet|tianma|snssdk|download|story|vertical_av|ad_av/.test(blob)
+    )
+      return true;
+  }
+
+  return false;
+}
+
 function isAdItem(item, opts) {
   if (!item || typeof item !== "object") return false;
+  // 红果/天马广告短剧：整卡删除（彻底刷不到）
+  if ((opts.短剧广告 || opts.常规广告) && isHongguoOrAdStory(item)) return true;
   if (item.ad_info || item.ad_cb || item.is_ad || item.is_ad_loc)
     return opts.常规广告;
   const goto = String(
@@ -84,23 +190,48 @@ function isAdItem(item, opts) {
     return opts.小游戏广告 || opts.常规广告;
   }
 
-  // short drama / playlet promo
+  // short drama / playlet promo (Story 竖屏流里的短剧/外跳推广)
+  // 含 playlet 链接、短剧 goto、红果等外链下载引导时，在 ad_drama 开启下剔除
+  const title = String(
+    item.title || item.desc || item.subtitle || item.rcmd_reason || ""
+  );
+  const extraText = String(
+    (item.args && (item.args.up_name || item.args.rname)) ||
+      item.up_name ||
+      item.author_name ||
+      ""
+  );
   if (
-    /playlet|comic_drama|short_play|shortplay|bilibili:\/\/(pgc\/)?drama|bilibili:\/\/comic/i.test(
-      uri
-    ) ||
-    /playlet|drama|short_play/.test(goto) ||
-    /playlet|drama/.test(cardType)
+    opts.短剧广告 ||
+    opts.常规广告
   ) {
     if (
-      item.ad_info ||
-      item.badge === "广告" ||
-      item.badge_text === "广告" ||
-      item.is_ad ||
-      goto.startsWith("ad") ||
-      cardType.startsWith("cm")
+      /playlet|comic_drama|short_play|shortplay|bilibili:\/\/(pgc\/)?drama|bilibili:\/\/comic|hongguo|redfruit|free.?short.?play/i.test(
+        uri
+      ) ||
+      /playlet|drama|short_play|shortplay|ogv_playlet/.test(goto) ||
+      /playlet|drama|short_play/.test(cardType) ||
+      /红果|免费短剧|短剧免费|海量短剧/.test(title + extraText) ||
+      item.playlet_info ||
+      item.playlet ||
+      item.short_play_info
     ) {
-      return opts.短剧广告 || opts.常规广告;
+      // 明确广告卡 / 外跳推广卡
+      if (
+        item.ad_info ||
+        item.ad_cb ||
+        item.is_ad ||
+        item.is_ad_loc ||
+        item.badge === "广告" ||
+        item.badge_text === "广告" ||
+        goto.startsWith("ad") ||
+        cardType.startsWith("cm") ||
+        /download|appstore|itunes|market:|hongguo|playlet|short_play|drama/i.test(
+          uri
+        )
+      ) {
+        return true;
+      }
     }
   }
 
@@ -195,16 +326,49 @@ function handleSplash(body, opts) {
 }
 
 function handleFeed(body, opts, url) {
+  // 推流：{ code, data: { items: [ storyItem, ... ] } }
+  // 红果广告 item 见 isHongguoOrAdStory 注释中的结构体还原
   if (!body.data) return body;
   const isStory = /feed\/index\/story/i.test(url);
+  // story/cart 等纯购物/推广挂件：可直接清空
+  if (isStory && /\/story\/cart/i.test(url) && (opts.常规广告 || opts.短剧广告)) {
+    if (body.data && typeof body.data === "object") {
+      body.data = Array.isArray(body.data) ? [] : {};
+    }
+    return body;
+  }
   if (Array.isArray(body.data.items)) {
     body.data.items = body.data.items.filter((item) => {
       if (isAdItem(item, opts)) return false;
       if (isStory) {
         const goto = String(item.card_goto || item.goto || "").toLowerCase();
-        if ((opts.短剧广告 || opts.常规广告) && (goto.startsWith("ad") || item.ad_info))
+        const uri = String(item.uri || item.link || item.jump_url || "");
+        // 整卡移除：红果/天马/ad_av 广告短剧（不只去链接）
+        if ((opts.短剧广告 || opts.常规广告) && isHongguoOrAdStory(item)) return false;
+        // 竖屏流广告卡
+        if ((opts.短剧广告 || opts.常规广告) && (goto.startsWith("ad") || item.ad_info || item.ad_cb))
           return false;
-        if (item.story_cart_icon && opts.常规广告) delete item.story_cart_icon;
+        // 短剧/外链下载推广
+        if (
+          opts.短剧广告 &&
+          (/playlet|short_play|shortplay|hongguo|drama|ad_story|tianma/i.test(goto + uri) ||
+            /红果|免费短剧|海量短剧|热门短剧/.test(
+              String(item.title || "") +
+                String(item.desc || "") +
+                String((item.args && item.args.up_name) || item.up_name || "")
+            ))
+        ) {
+          return false;
+        }
+        // 清除 story 购物/挂件推广字段
+        if (opts.常规广告 || opts.短剧广告) {
+          delete item.story_cart_icon;
+          delete item.story_cart;
+          delete item.story_cart_info;
+          if (item.three_point) {
+            // keep structure, strip ad-like entries if array
+          }
+        }
       }
       if (opts.小游戏广告) {
         const goto = String(item.card_goto || item.goto || "").toLowerCase();
@@ -213,6 +377,14 @@ function handleFeed(body, opts, url) {
       }
       return true;
     });
+  }
+  // 清理 story 流顶层挂件
+  if (isStory && (opts.常规广告 || opts.短剧广告)) {
+    for (const k of Object.keys(body.data)) {
+      if (/story_cart|cart_icon|playlet_ad|short_play_ad|drama_ad/i.test(k)) {
+        body.data[k] = Array.isArray(body.data[k]) ? [] : null;
+      }
+    }
   }
   if (Array.isArray(body.data.banner_item) && opts.常规广告) {
     body.data.banner_item = body.data.banner_item.filter(

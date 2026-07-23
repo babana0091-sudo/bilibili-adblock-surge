@@ -33,6 +33,8 @@ https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bi
 
 固定某一版可用 Releases 资产；日常请用 raw `main` 链以便自动更新。
 
+脚本使用模块内相对路径 `js/*.js`，与模块同分支/同版本一起加载，避免模块更新了脚本还指向旧 URL。
+
 ## 参数
 
 | 参数 | 默认 | 含义 |
@@ -56,9 +58,10 @@ https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bi
    - **当日（北京时间）任一时段成功** → 标记成功，后续时段跳过
    - 失败则下一时段继续尝试
    - 次日北京时间 0 点起重新开始（按日期，不是终身只签一次）
-3. **仅大会员**自动签到：先请求接口判断会员身份（结果只写脚本日志，不弹窗）；非会员整次跳过
-4. 会员任务：直播签到 + **大积分签到** + 经验状态等
-5. 不需要时将 `checkin` 设为 `false`
+3. **仅大会员**自动签到：用接口判断会员（结果只写 Surge 日志 `[BiliCheckin]`，不弹窗）；非会员整次跳过
+4. **额外会员检测**（有 Cookie 时）：抓到/更新 Session、网络变化、以及每小时 cron 拉起时（30 分钟节流）
+5. 会员任务：直播签到 + **大积分签到** + 经验状态等
+6. 不需要时将 `checkin` 设为 `false`
 
 Cookie 仅保存在本机 `$persistentStore`，不会外传。
 

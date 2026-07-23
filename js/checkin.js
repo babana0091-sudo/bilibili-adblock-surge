@@ -116,6 +116,34 @@ function cookieMap(cookie) {
   return o;
 }
 
+
+/** SESSDATA in Cookie must be URL-encoded for some web APIs (`,` → %2C). */
+function cookieForWebApi(cookie) {
+  if (!cookie) return "";
+  return String(cookie).replace(/SESSDATA=([^;]+)/, function (_, v) {
+    try {
+      // if already encoded, decode once then re-encode
+      const raw = decodeURIComponent(v);
+      return "SESSDATA=" + encodeURIComponent(raw);
+    } catch (e) {
+      return "SESSDATA=" + encodeURIComponent(v);
+    }
+  });
+}
+
+function webHeaders(store, referer) {
+  const cookie = cookieForWebApi((store && store.cookie) || "");
+  const h = {
+    "User-Agent":
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BiliApp/80000100 os/ios model/iPhone mobi_app/iphone build/80000100",
+    Referer: referer || "https://www.bilibili.com/",
+    Origin: "https://www.bilibili.com",
+    Accept: "application/json, text/plain, */*",
+  };
+  if (cookie) h.Cookie = cookie;
+  return h;
+}
+
 async function detectVipStatus(baseHeaders, accessKey) {
   // App 侧主鉴权是 access_key（URL query）；Web 才是 Cookie SESSDATA。
   // 官方多数接口：Cookie(SESSDATA) / access_key 二选一即可。
@@ -756,15 +784,20 @@ async function doCheckin(opts, flags) {
     "token=" + (hasAK ? "yes" : "no"),
     "fromOpen=" + fromOpen
   );
+  // 打开 App 后台任务：有缓存会员状态则跳过重复探测，加快
   try {
-    await probeVipIfSession(opts, fromOpen ? "open-app" : "manual", false);
+    if (!(fromOpen && store.vipCheckedAt && store.isVip != null && Date.now() - Date.parse(store.vipCheckedAt) < 6 * 3600 * 1000)) {
+      await probeVipIfSession(opts, fromOpen ? "open-app" : "manual", false);
+    } else {
+      log("vip cache hit", store.isVip, store.vipDetail);
+    }
   } catch (e) {
     log("vip probe err", e);
   }
 
-  // 短抖动，避免一打开就扎堆（远小于旧 cron 延迟）
-  const delayMs = randomCheckinDelayMs();
-  log("open-app checkin jitter ms", delayMs, "bj", beijingParts());
+  // 极短抖动（后台执行，不挡请求）
+  const delayMs = fromOpen ? 200 + Math.floor(Math.random() * 800) : randomCheckinDelayMs();
+  log("checkin jitter ms", delayMs, "fromOpen=" + fromOpen, "bj", beijingParts());
   await sleep(delayMs);
 
   store.lastAttemptAt = new Date().toISOString();
@@ -773,13 +806,7 @@ async function doCheckin(opts, flags) {
   const cookie = store.cookie || "";
   const csrf = store.csrf || cookieMap(cookie).bili_jct || "";
   const accessKey = store.bili_app_token || "";
-  const baseHeaders = {
-    "User-Agent":
-      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BiliApp",
-    Referer: "https://www.bilibili.com/",
-    Origin: "https://www.bilibili.com",
-  };
-  if (cookie) baseHeaders.Cookie = cookie;
+  const baseHeaders = webHeaders(store, "https://www.bilibili.com/");
 
   // 大会员判断：只写日志，不弹窗；非会员整次签到跳过
   // Prefer cookie; if only access_key, still try nav with access_key query via detect
@@ -793,68 +820,48 @@ async function doCheckin(opts, flags) {
 
   const lines = [];
   let okAny = false;
+  let hardFail = false; // true if a required task failed (not skip)
+
   if (!hasCookie) {
     lines.push(
-      "提示: 当前只有 access_key、无 Cookie。App 请求带 appkey+sign，Web 签到接口需要 SESSDATA，故易出现 -663"
+      "提示: 无 Cookie/SESSDATA，大积分/分享等 Web 接口无法鉴权"
     );
+    hardFail = true;
   }
 
-  // 1) Live sign — Web API DoSign expects Cookie(SESSDATA).
-  // Bare access_key without appkey+sign → often code=-663 鉴权失败 (App 鉴权不完整).
+  // 1) 直播签到已下线（code=1 签到活动已下线）— 已移除
+
+  // 2) 大会员大积分签到
+  // POST https://api.bilibili.com/pgc/activity/score/task/sign
+  // 文档: Cookie(SESSDATA 需 URL 编码) + Referer *.bilibili.com + csrf；APP 可用 access_key
+  // App 页面: big.bilibili.com/mobile/bigPoint
   try {
-    if (!cookie || !cookie.includes("SESSDATA")) {
-      lines.push(
-        "直播签到: 跳过（无 Cookie/SESSDATA；仅 access_key 调 Web 接口会 -663 鉴权失败）"
-      );
-      log("live sign skip: need SESSDATA cookie; app uses access_key+appkey+sign");
-    } else {
-      const signUrl =
-        "https://api.live.bilibili.com/xlive/web-ucenter/v1/sign/DoSign";
-      const r = await http("GET", signUrl, baseHeaders);
-      const j = JSON.parse(r.data || "{}");
-      if (j.code === 0) {
-        okAny = true;
-        const d = j.data || {};
-        lines.push(
-          `直播签到: 成功 (${d.hadSignDays || "?"}/${d.allDays || "?"}天) ${
-            d.text || ""
-          }`
-        );
-      } else if (j.code === 1011040) {
-        okAny = true;
-        lines.push("直播签到: 今日已签");
-      } else if (j.code === -663 || j.code === -101) {
-        lines.push(
-          `直播签到: 失败 code=${j.code} ${j.message || j.msg || ""}（登录态无效或缺少 Cookie）`
-        );
-      } else {
-        lines.push(`直播签到: 失败 code=${j.code} ${j.message || j.msg || ""}`);
-      }
+    if (!store.isVip && store.isVip !== true) {
+      // re-read: isVip may be from detect above
     }
-  } catch (e) {
-    lines.push("直播签到: 异常 " + e);
-  }
-
-    // 2) VIP 大积分签到 — Web POST，需要 Cookie + bili_jct(csrf)
-  // 裸 access_key 会 -663 鉴权失败
-  try {
-    if (!store.isVip) {
+    const isVip = !!store.isVip;
+    if (!isVip) {
       lines.push("大积分签到: 跳过（非大会员）");
     } else if (!cookie || !cookie.includes("SESSDATA")) {
       lines.push("大积分签到: 跳过（无 Cookie/SESSDATA）");
+      hardFail = true;
     } else {
-      const headers = Object.assign({}, baseHeaders, {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Referer: "https://big.bilibili.com/",
-        Origin: "https://www.bilibili.com",
-      });
+      const headers = webHeaders(store, "https://big.bilibili.com/mobile/bigPoint/task");
+      headers["Content-Type"] = "application/x-www-form-urlencoded";
+      headers.Origin = "https://big.bilibili.com";
+      headers.Referer = "https://big.bilibili.com/mobile/bigPoint/task";
       let body = "";
-      if (csrf) body = "csrf=" + encodeURIComponent(csrf);
+      if (csrf) body = "csrf=" + encodeURIComponent(csrf) + "&csrf_token=" + encodeURIComponent(csrf);
+      // APP 方式可附带 access_key（文档）；有则带上
+      if (accessKey) {
+        body = (body ? body + "&" : "") + "access_key=" + encodeURIComponent(accessKey);
+      }
       const r = await http(
         "POST",
         "https://api.bilibili.com/pgc/activity/score/task/sign",
         headers,
-        body
+        body || "csrf=",
+        8
       );
       let j = {};
       try {
@@ -867,9 +874,10 @@ async function doCheckin(opts, flags) {
         okAny = true;
         lines.push("大积分签到: 成功");
       } else if (
-        /已签|重复|already|今日已|签到过/i.test(msg) ||
+        /已签|重复|already|今日已|签到过|已完成/i.test(msg) ||
         j.code === 71000 ||
-        j.code === 6000002
+        j.code === 6000002 ||
+        j.code === 710001
       ) {
         okAny = true;
         lines.push("大积分签到: 今日已签 (" + (j.code != null ? j.code : "") + ")");
@@ -879,68 +887,173 @@ async function doCheckin(opts, flags) {
         /非大会员|不是大会员|权限不足|未开通/i.test(msg)
       ) {
         lines.push("大积分签到: 非会员/无权限，跳过");
-      } else if (j.code === -663 || j.code === -101) {
+      } else if (j.code === 6007000) {
+        // 常见：参数/Referer/Cookie 编码问题
+        hardFail = true;
         lines.push(
-          "大积分签到: 失败 code=" +
-            j.code +
-            " " +
-            msg +
-            "（登录态无效或缺少 Cookie）"
+          "大积分签到: 失败 code=6007000 请求错误（检查 Cookie 编码/Referer/csrf；与 App big.bilibili.com 不一致时常见）"
         );
+        log("bigpoint raw", String(r.data || "").slice(0, 200));
       } else {
+        hardFail = true;
         lines.push(
           "大积分签到: 失败 code=" +
             (j.code != null ? j.code : r.status) +
             " " +
             msg
         );
+        log("bigpoint raw", String(r.data || "").slice(0, 200));
       }
     }
   } catch (e) {
+    hardFail = true;
     lines.push("大积分签到: 异常 " + e);
   }
 
-  // 3) Exp reward status
+  // 3) 经验任务：查询 + 尝试自动分享（share/add）
+  // 分享: POST https://api.bilibili.com/x/web-interface/share/add  body: aid + csrf
+  // 先拉排行榜取一个 aid（无需登录）
   try {
-    const r = await http(
+    let exp = null;
+    const r0 = await http(
       "GET",
       "https://api.bilibili.com/x/member/web/exp/reward",
-      baseHeaders
+      webHeaders(store, "https://www.bilibili.com/"),
+      null,
+      8
     );
-    const j = JSON.parse(r.data || "{}");
-    if (j.code === 0 && j.data) {
-      const d = j.data;
+    try {
+      const j0 = JSON.parse(r0.data || "{}");
+      if (j0.code === 0) exp = j0.data;
+      else lines.push("经验任务: 查询 code=" + j0.code);
+    } catch (e) {
+      lines.push("经验任务: 查询解析失败");
+    }
+
+    if (exp && exp.share) {
       lines.push(
-        `经验任务: 登录${d.login ? "✓" : "✗"} 观看${d.watch ? "✓" : "✗"} 分享${
-          d.share ? "✓" : "✗"
-        } 投币${d.coins || 0}`
+        "经验任务: 登录" +
+          (exp.login ? "✓" : "✗") +
+          " 观看" +
+          (exp.watch ? "✓" : "✗") +
+          " 分享✓ 投币" +
+          (exp.coins || 0) +
+          "（分享已完成）"
       );
-    } else {
-      lines.push(`经验任务: code=${j.code}`);
+      if (exp.login || exp.watch || exp.share) okAny = true;
+    } else if (exp && cookie && csrf) {
+      // auto share
+      let aid = null;
+      try {
+        const rr = await http(
+          "GET",
+          "https://api.bilibili.com/x/web-interface/ranking/v2?rid=0&type=all",
+          webHeaders(store, "https://www.bilibili.com/"),
+          null,
+          8
+        );
+        const jr = JSON.parse(rr.data || "{}");
+        const list = (jr.data && jr.data.list) || [];
+        if (list.length) {
+          const pick = list[Math.floor(Math.random() * Math.min(list.length, 10))];
+          aid = pick.aid || (pick.stat && pick.stat.aid);
+        }
+      } catch (e) {
+        log("ranking for share err", e);
+      }
+      if (!aid) {
+        lines.push(
+          "经验任务: 登录" +
+            (exp.login ? "✓" : "✗") +
+            " 观看" +
+            (exp.watch ? "✓" : "✗") +
+            " 分享✗ 投币" +
+            (exp.coins || 0) +
+            "（未取到 aid，分享跳过）"
+        );
+      } else {
+        const sh = webHeaders(store, "https://www.bilibili.com/video/");
+        sh["Content-Type"] = "application/x-www-form-urlencoded";
+        const body =
+          "aid=" +
+          encodeURIComponent(String(aid)) +
+          "&eab_x=2&ramval=0&source=web_normal&ga=1&csrf=" +
+          encodeURIComponent(csrf);
+        const rs = await http(
+          "POST",
+          "https://api.bilibili.com/x/web-interface/share/add",
+          sh,
+          body,
+          8
+        );
+        let js = {};
+        try {
+          js = JSON.parse(rs.data || "{}");
+        } catch (e) {}
+        // 0 ok; 71000 already shared etc.
+        if (js.code === 0 || js.code === 71000 || /已分享|重复/i.test(String(js.message || ""))) {
+          okAny = true;
+          lines.push(
+            "经验任务: 分享成功 aid=" +
+              aid +
+              "；登录" +
+              (exp.login ? "✓" : "✗") +
+              " 观看" +
+              (exp.watch ? "✓" : "✗") +
+              " 投币" +
+              (exp.coins || 0)
+          );
+        } else {
+          hardFail = true;
+          lines.push(
+            "经验任务: 分享失败 code=" +
+              js.code +
+              " " +
+              (js.message || js.msg || "") +
+              "；登录" +
+              (exp.login ? "✓" : "✗") +
+              " 观看" +
+              (exp.watch ? "✓" : "✗")
+          );
+        }
+      }
+    } else if (exp) {
+      lines.push(
+        "经验任务: 登录" +
+          (exp.login ? "✓" : "✗") +
+          " 观看" +
+          (exp.watch ? "✓" : "✗") +
+          " 分享" +
+          (exp.share ? "✓" : "✗") +
+          " 投币" +
+          (exp.coins || 0)
+      );
     }
   } catch (e) {
     lines.push("经验任务: 异常 " + e);
   }
 
-  // 4) VIP privilege receive (type=1 B-coin coupon) - monthly, ignore if not eligible
-  if (csrf) {
+  // 4) VIP privilege receive - ignore already claimed
+  if (csrf && cookie) {
     try {
-      const body = `type=1&csrf=${encodeURIComponent(csrf)}`;
-      const headers = Object.assign({}, baseHeaders, {
-        "Content-Type": "application/x-www-form-urlencoded",
-      });
+      const body = "type=1&csrf=" + encodeURIComponent(csrf);
+      const headers = webHeaders(store, "https://account.bilibili.com/");
+      headers["Content-Type"] = "application/x-www-form-urlencoded";
       const r = await http(
         "POST",
         "https://api.bilibili.com/x/vip/privilege/receive",
         headers,
-        body
+        body,
+        8
       );
       const j = JSON.parse(r.data || "{}");
       if (j.code === 0) {
         okAny = true;
         lines.push("大会员福利: 领取成功");
+      } else if (/已领取|已经领取|领取过/i.test(String(j.message || j.msg || ""))) {
+        lines.push("大会员福利: 已领取过（忽略）");
       } else {
-        lines.push(`大会员福利: ${j.message || j.msg || j.code}`);
+        lines.push("大会员福利: " + (j.message || j.msg || j.code));
       }
     } catch (e) {
       lines.push("大会员福利: 异常 " + e);
@@ -948,38 +1061,44 @@ async function doCheckin(opts, flags) {
   }
 
   // 5) silver2coin optional
-  if (opts.银瓜子换硬币 && csrf) {
+  if (opts.银瓜子换硬币 && csrf && cookie) {
     try {
-      const body = `csrf_token=${encodeURIComponent(
-        csrf
-      )}&csrf=${encodeURIComponent(csrf)}`;
-      const headers = Object.assign({}, baseHeaders, {
-        "Content-Type": "application/x-www-form-urlencoded",
-      });
+      const body =
+        "csrf_token=" +
+        encodeURIComponent(csrf) +
+        "&csrf=" +
+        encodeURIComponent(csrf);
+      const headers = webHeaders(store, "https://live.bilibili.com/");
+      headers["Content-Type"] = "application/x-www-form-urlencoded";
       const r = await http(
         "POST",
         "https://api.live.bilibili.com/xlive/revenue/v1/wallet/silver2coin",
         headers,
-        body
+        body,
+        8
       );
       const j = JSON.parse(r.data || "{}");
       if (j.code === 0) {
         okAny = true;
         lines.push("银瓜子换硬币: 成功");
       } else {
-        lines.push(`银瓜子换硬币: ${j.message || j.msg || j.code}`);
+        lines.push("银瓜子换硬币: " + (j.message || j.msg || j.code));
       }
     } catch (e) {
       lines.push("银瓜子换硬币: 异常 " + e);
     }
   }
 
+  // treat already-done privilege as non-failure; success if any okAny
+  // hardFail only forces failure notify if nothing ok
+
   store.lastRunDay = day;
   store.lastRunOk = okAny;
   store.lastResult = lines.join(" | ");
+  store.lastHardFail = !!hardFail && !okAny;
   writeStore(store);
 
-  // 失败立刻通知；成功也通知一次（当天成功后不会再跑）
+  // 失败立刻通知；成功通知一次
   if (!okAny) {
     notify(NAME, "签到失败", lines.join("\n") || "未知错误");
   } else {
@@ -1016,7 +1135,8 @@ async function doCheckin(opts, flags) {
     "bj=" + JSON.stringify(beijingParts())
   );
 
-  // 无定时任务：打开 B 站时 capture + 尝试签到；失败立即通知
+  // 无定时任务：打开 B 站只做 trigger
+  // capture 同步、立刻 $done，不阻塞业务请求；签到延后异步执行（类似后台任务）
   if (typeof $request !== "undefined" && $request && $request.url) {
     const reqUrl = String($request.url);
     log("path=open-app capture", reqUrl.slice(0, 120));
@@ -1025,20 +1145,44 @@ async function doCheckin(opts, flags) {
     } catch (e) {
       log("capture err", e);
     }
-    // 轻量启动类请求上尝试签到，避免刷 feed 时拖慢
-    try {
-      if (opts.自动签到 && isCheckinTriggerUrl(reqUrl)) {
-        log("path=open-app try checkin");
-        await doCheckin(opts, { fromOpen: true });
+    const should =
+      opts.自动签到 && typeof isCheckinTriggerUrl === "function" && isCheckinTriggerUrl(reqUrl);
+    // 先放行请求，再后台签到（Surge 对 $done 后定时器/Promise 支持因版本而异；用 setTimeout 尽量不挡用户）
+    if (should) {
+      log("schedule background checkin after $done");
+      try {
+        setTimeout(function () {
+          doCheckin(opts, { fromOpen: true }).catch(function (e) {
+            log("bg checkin err", e);
+            notify(NAME, "签到失败", String(e));
+          });
+        }, 50);
+      } catch (e) {
+        // 无 setTimeout 时退化为不 await 的 Promise（仍可能被提前回收）
+        doCheckin(opts, { fromOpen: true }).catch(function (err) {
+          log("bg checkin err", err);
+          notify(NAME, "签到失败", String(err));
+        });
       }
-    } catch (e) {
-      log("open-app checkin err", e);
-      notify(NAME, "签到失败", String(e));
     }
     $done({});
   } else if (stype === "event") {
     log("path=event network-changed");
-    await probeVipIfSession(opts, "network-changed", false);
+    // 网络变化：后台尝试签到（不阻塞）
+    try {
+      setTimeout(function () {
+        if (opts.自动签到) {
+          doCheckin(opts, { fromOpen: true }).catch(function (e) {
+            log("event checkin err", e);
+          });
+        }
+      }, 100);
+    } catch (e) {
+      probeVipIfSession(opts, "network-changed", false).finally(function () {
+        $done({});
+      });
+      return;
+    }
     $done({});
   } else {
     log("path=manual doCheckin");

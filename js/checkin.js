@@ -411,6 +411,8 @@ async function captureCookie(opts) {
   const auth = getHeader(headers, "Authorization") || "";
   const store = readStore();
   let sessionChanged = false;
+  let tokenChanged = false;
+  let cookieChanged = false;
   let gotCookie = false;
   let gotToken = false;
   let tokenFromReq = "";
@@ -422,10 +424,12 @@ async function captureCookie(opts) {
       store.cookie = cookie;
       store.cookieUpdatedAt = new Date().toISOString();
       sessionChanged = true;
+      cookieChanged = true;
     } else if (cookie.includes("SESSDATA") && !store.cookie) {
       store.cookie = cookie;
       store.cookieUpdatedAt = new Date().toISOString();
       sessionChanged = true;
+      cookieChanged = true;
     }
     const m = cookieMap(cookie);
     if (m.bili_jct) store.csrf = m.bili_jct;
@@ -437,6 +441,7 @@ async function captureCookie(opts) {
     if (!store.cookie && m.SESSDATA) {
       store.cookie = cookie;
       sessionChanged = true;
+      cookieChanged = true;
       gotCookie = true;
     }
   }
@@ -494,6 +499,7 @@ async function captureCookie(opts) {
             store.bili_app_token = ak;
             store.biliAppTokenUpdatedAt = new Date().toISOString();
             sessionChanged = true;
+            tokenChanged = true;
           }
         }
       }
@@ -520,11 +526,12 @@ async function captureCookie(opts) {
     "url=" + String(url).slice(0, 90)
   );
 
-  // Notify policy (device local timezone day):
-  // - At most once per local calendar day
-  // - After a notify today, no more that day even if token rotates
-  // - Next local day: notify again only if token/cookie changed (sessionChanged)
-  if (!sessionChanged) {
+  // Notify policy (device/phone local calendar day):
+  // - token 更新通知：本地自然日最多 1 次
+  // - cookie 更新通知：本地自然日最多 1 次
+  // - 同一天最多 2 次（token 一次 + cookie 一次）
+  // - 次日：对应类型在凭证再次变化时才可再通知
+  if (!sessionChanged || (!tokenChanged && !cookieChanged)) {
     $done({});
     return;
   }
@@ -539,13 +546,30 @@ async function captureCookie(opts) {
   }
 
   const localDay = deviceLocalDay();
-  if (store.sessionNotifyLocalDay === localDay) {
-    log("capture notify skip: already notified local day", localDay);
+  const tokenNotifiedToday = store.tokenNotifyLocalDay === localDay;
+  const cookieNotifiedToday = store.cookieNotifyLocalDay === localDay;
+  let notifyKind = "";
+  if (tokenChanged && cookieChanged && !tokenNotifiedToday && !cookieNotifiedToday) {
+    notifyKind = "token"; // one combined popup; both daily caps set below
+  } else if (tokenChanged && !tokenNotifiedToday) {
+    notifyKind = "token";
+  } else if (cookieChanged && !cookieNotifiedToday) {
+    notifyKind = "cookie";
+  }
+  if (!notifyKind) {
+    log(
+      "capture notify skip: daily cap",
+      "localDay=" + localDay,
+      "tokenChanged=" + tokenChanged,
+      "cookieChanged=" + cookieChanged,
+      "tokenNotifiedToday=" + tokenNotifiedToday,
+      "cookieNotifiedToday=" + cookieNotifiedToday
+    );
     $done({});
     return;
   }
 
-  // VIP only when we will notify (new local day + credentials changed)
+  // VIP only when we will notify
   let vipLine = "会员: 查询失败";
   try {
     const hdrs = buildAuthHeaders(store);
@@ -594,7 +618,17 @@ async function captureCookie(opts) {
   }
 
   store.sessionNotifyAt = new Date().toISOString();
-  store.sessionNotifyLocalDay = deviceLocalDay(); // phone local calendar day
+  if (notifyKind === "token") {
+    store.tokenNotifyLocalDay = localDay;
+    // both changed together → one popup is enough for both types today
+    if (cookieChanged) store.cookieNotifyLocalDay = localDay;
+  }
+  if (notifyKind === "cookie") {
+    store.cookieNotifyLocalDay = localDay;
+    if (tokenChanged && store.tokenNotifyLocalDay !== localDay) {
+      // cookie-only path; leave token slot free if token also changed but token was already notified
+    }
+  }
   writeStore(store);
 
   // Order: 会员 → access_token → UID → Cookie last
@@ -603,13 +637,25 @@ async function captureCookie(opts) {
   parts.push(store.bili_app_token ? "access_token: 有" : "access_token: 无");
   if (store.uid) parts.push("UID " + store.uid);
   parts.push(
-    gotCookie || (store.cookie && String(store.cookie).includes("SESSDATA"))
+    store.cookie && String(store.cookie).includes("SESSDATA")
       ? "Cookie: 有"
       : "Cookie: 无"
   );
+  parts.push(
+    notifyKind === "token"
+      ? "原因: access_token 更新"
+      : "原因: Cookie 更新"
+  );
   parts.push("登录态已保存");
-  notify(NAME, "登录态已捕获", parts.join("\n"));
-  log("session notify (local day + credentials changed)", localDay, parts.join(" | "));
+  const title =
+    notifyKind === "token" ? "登录态已捕获 (Token)" : "登录态已捕获 (Cookie)";
+  notify(NAME, title, parts.join("\n"));
+  log(
+    "session notify",
+    "kind=" + notifyKind,
+    "localDay=" + localDay,
+    parts.join(" | ")
+  );
   $done({});
 }
 

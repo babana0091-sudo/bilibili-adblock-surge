@@ -1,9 +1,9 @@
 #!name=哔哩哔哩去广告（融合增强）
-#!desc=Surge 纯网络 MITM：B 站广告屏蔽 + 可选自动签到。v2.0.5
+#!desc=Surge 纯网络 MITM：B 站广告屏蔽 + 可选自动签到。v2.0.6
 #!author=babana0091-sudo
 #!homepage=https://github.com/babana0091-sudo/bilibili-adblock-surge
 #!category=去广告
-#!version=2.0.5
+#!version=2.0.6
 #!arguments=ad_normal:true,ad_pause:true,ad_game:true,ad_drama:true,checkin:true,silver2coin:false,block_risk:false,debug:false
 #!arguments-desc=ad_normal(常规广告): 开屏/推荐/信息流等\n默认 true\n\nad_pause(暂停广告): 暂停页商业卡\n默认 true\n\nad_game(小游戏广告)\n默认 true\n\nad_drama(短剧广告)\n默认 true\n\ncheckin(自动签到)\n默认 true\n\nsilver2coin(银瓜子换硬币)\n默认 false\n\nblock_risk(拦截Gaia风控上报)\n默认 false\n\ndebug(调试日志)\n默认 false
 

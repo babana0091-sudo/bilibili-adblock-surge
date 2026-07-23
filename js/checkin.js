@@ -17,7 +17,7 @@
 // Storage key: bili_adblock_checkin
 
 const STORE_KEY = "bili_adblock_checkin";
-const SCRIPT_VERSION = "2.0.5";
+const SCRIPT_VERSION = "2.0.6";
 const NAME = "哔哩签到";
 
 function parseArgs(raw) {

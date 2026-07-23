@@ -381,10 +381,14 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Random delay 45s–8min to avoid on-the-hour bursts. */
+/**
+ * Random delay before sign APIs (anti 整点扎堆).
+ * MUST stay well under Surge cron script timeout (module: 180s).
+ * Old 45s–8min caused: Script timeout: bili-checkin-cron
+ */
 function randomCheckinDelayMs() {
-  const min = 45 * 1000;
-  const max = 8 * 60 * 1000;
+  const min = 15 * 1000;  // 15s
+  const max = 90 * 1000;  // 90s
   return min + Math.floor(Math.random() * (max - min + 1));
 }
 
@@ -627,7 +631,7 @@ async function doCheckin(opts) {
 
   // Avoid整点批量：北京时间时段内再随机延迟一段时间
   const delayMs = randomCheckinDelayMs();
-  log("random delay ms", delayMs, "bj", beijingParts());
+  log("random delay ms", delayMs, "(cron timeout budget ~180s)", "bj", beijingParts());
   await sleep(delayMs);
 
   // Re-check after delay: day/hour may have changed; still only act in slot hours

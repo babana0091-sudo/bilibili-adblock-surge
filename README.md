@@ -103,7 +103,7 @@ INSTALL.md
 根因：`DOMAIN,cm.bilibili.com,REJECT` 整域拒绝太狠。  
 评论半屏广告组件会访问该域，整域拒绝时 UI 可能一直等。
 
-### 当前版本：v1.1.4（行为等同 1.1.2）
+### 当前版本：v1.1.5（详情页轻量化）
 
 - **取消** `DOMAIN,cm.bilibili.com,REJECT`
 - **不**对 cm 做 Map Local 空返回（1.1.3 已回退；版本号升到 1.1.4 方便 Surge 直接更新）
@@ -114,6 +114,24 @@ INSTALL.md
 ```text
 https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bilibili-adblock.sgmodule
 ```
+
+
+
+## 视频能播、简介/评论一直骨架屏？
+
+这通常**不是**“B站被改去代理”。
+
+本模块 **没有** `PROXY` / 策略组规则，不会强制 B 站走代理。  
+更常见原因：
+
+1. 详情页 `View` gRPC 被 **protobuf 脚本全量改写**（CPU/时延高）→ 下方简介/评论等主接口回来了也渲染慢  
+2. `api/app.biliapi.*` 被 **整域 REJECT** → 备用 API 失败重试  
+3. 同时开了多个 B 站模块 + 全局 MITM，叠加更卡
+
+v1.1.5 已：
+- 去掉 `bili-proto`
+- 去掉 `biliapi.*` 整域 REJECT
+- 保留普通广告 Map Local / JSON 去广告
 
 
 ## License

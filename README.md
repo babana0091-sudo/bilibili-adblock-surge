@@ -1,163 +1,75 @@
-# 哔哩哔哩去广告（融合增强）· Surge 模块
+# 哔哩哔哩去广告 · Surge
 
-> **纯网络 MITM**：只改 HTTP/HTTPS/gRPC 响应 + 可选定时签到。  
-> **不修改 App、不涉及越狱/注入。**
+<p align="center">
+  <strong>纯网络 MITM</strong> · 不改包 · 不越狱 · 可自动更新
+</p>
 
-## 1) 能不能自动更新？
+适用于 **Surge iOS / Mac** 的哔哩哔哩去广告模块，可选每日自动签到。
 
-### 结论
+## 功能
 
-| 安装链接类型 | 能否被 Surge 自动更新 | 例子 |
-|---|---|---|
-| **分支 raw 永久链**（`.../main/xxx.sgmodule`） | **能**（模块列表可「更新」拉最新文件） | app2smile、ClydeTime 签到模块 |
-| **Release 带版本号链**（`.../releases/download/v1.0.1/...`） | **不能自动变到新版本**（URL 钉死版本） | 我们之前的 v1.0.1 release、BiliUniverse 部分 release 资产 |
-| GitHub 仓库首页 / blob 页 | 无效 | 会报「并非有效的配置文件」 |
+| 能力 | 说明 |
+|:--|:--|
+| 常规广告 | 开屏、推荐流、Banner、直播/番剧页等 |
+| 暂停广告 | 播放暂停相关商业内容（网络层） |
+| 小游戏广告 | biligame / miniapp 广告位 |
+| 短剧广告 | Story / playlet 推广 |
+| 自动签到 | 抓 Cookie，每日定时直播签到等 |
+| 风控上报 | 可选拦截 Gaia 设备上报（默认关） |
 
-别人能自动更新，是因为他们给的是：
+> 仅处理网络请求/响应。端内本地 UI 广告无法 100% 保证。
 
-```text
-https://raw.githubusercontent.com/<user>/<repo>/<branch>/xxx.sgmodule
-```
-
-**不是** release 版本号链接。
-
-### 我们推荐安装（可自动更新）
+## 安装（推荐，可自动更新）
 
 ```text
 https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bilibili-adblock.sgmodule
 ```
 
-备用 CDN：
+1. Surge → **模块** → **安装新模块…**
+2. 粘贴上方 **raw** 链接（必须以 `.sgmodule` 结尾）
+3. 启用模块
+4. 开启 **MITM**，并打开 **MITM over HTTP/2**
+5. 以后更新：模块 → **更新**
 
-```text
-https://cdn.jsdelivr.net/gh/babana0091-sudo/bilibili-adblock-surge@main/bilibili-adblock.sgmodule
-```
+固定某一版可用 Releases 资产；日常请用 raw `main` 链以便自动更新。
 
-Release 资产仍可用于「固定某一版」，但不适合日常自动更新。
+## 参数
 
-### iOS 安装步骤
+| 参数 | 默认 | 含义 |
+|:--|:--:|:--|
+| `ad_normal` | true | 常规广告 |
+| `ad_pause` | true | 暂停广告 |
+| `ad_game` | true | 小游戏广告 |
+| `ad_drama` | true | 短剧广告 |
+| `checkin` | true | 自动签到 |
+| `silver2coin` | false | 银瓜子换硬币 |
+| `block_risk` | false | 拦截 Gaia 风控上报 |
+| `debug` | false | 调试日志 |
 
-1. Surge → **模块** → **安装新模块...**
-2. 粘贴上面的 **raw** 链接（必须以 `.sgmodule` 结尾）
-3. 保存并勾选启用
-4. 以后要更新：模块右侧 `···` → **更新**（或等 Surge 自动检查）
-5. 开启 **MITM + MITM over HTTP/2**
+参数键使用 **ASCII**（`ad_normal` 等），说明可用中文。
 
-不要用：
+### 自动签到
 
-```text
-https://github.com/babana0091-sudo/bilibili-adblock-surge
-.../blob/main/...
-.../releases/download/v1.0.1/...   # 固定版本，不自动升到 v1.1
-```
+1. 启用模块并打开 App 首页一次（抓取 Cookie）
+2. 每天 **07:30** 自动执行直播签到等任务
+3. 不需要时将 `checkin` 设为 `false`
 
----
-
-## 2) 功能开关（中文）
-
-| 开关 | 默认 | 说明 |
-|---|---|---|
-| **常规广告** | 开 | 开屏/推荐/Banner/搜索/直播番剧基础广告 |
-| **暂停广告** | 开 | 播放页 gRPC 商业卡（网络层） |
-| **小游戏广告** | 开 | biligame 广告位 / IAA / miniapp ad |
-| **短剧广告** | 开 | Story / playlet 推广 |
-| **自动签到** | 开 | 抓 Cookie + 每天 7:30 签到 |
-| **银瓜子换硬币** | 关 | 签到时可选 |
-| **调试日志** | 关 |  |
-
----
-
-## 3) 自动签到怎么用
-
-完全是 **Surge 脚本 + 网络 API**（参考 ClydeTime / chavyleung 思路，对照 IPA 中 `fingerprint` 等路径），不是越狱。
-
-1. 安装并启用本模块  
-2. **完全退出** 哔哩哔哩 App 后重新打开首页一次  
-3. 若 Cookie 抓到，会通知「Cookie 已更新」  
-4. 每天 **07:30** 自动执行：
-   - 直播签到 `DoSign`
-   - 查询经验任务状态 `exp/reward`
-   - 尝试大会员福利领取 `vip/privilege/receive`（不符合资格会提示失败，可忽略）
-   - 可选：银瓜子换硬币
-
-关闭签到：模块参数里把 **自动签到** 设为 `false`。
-
-> 说明：完整「投币/分享/点赞刷经验」链路更复杂且风控更高；当前版本先做**签到核心**（直播签到 + 福利领取 + 状态查询）。需要再加投币可继续迭代。
-
----
+Cookie 仅保存在本机 `$persistentStore`，不会外传。
 
 ## 仓库结构
 
 ```text
-bilibili-adblock.sgmodule   # 安装入口（请用 raw 链）
-js/json-response.js
-js/proto-response.js
-js/checkin.js               # 抓 Cookie + 定时签到
-js/common.js
-docs/interfaces.md
-INSTALL.md
+bilibili-adblock.sgmodule   # 模块入口
+js/                        # 脚本
+LICENSE                    # AGPL-3.0
 ```
 
-## 短视频评论一直转圈？
+## 开发
 
-根因：`DOMAIN,cm.bilibili.com,REJECT` 整域拒绝太狠。  
-评论半屏广告组件会访问该域，整域拒绝时 UI 可能一直等。
-
-### 当前版本：v1.1.7（还原 1.1.4/1.1.2）
-> 用户确认详情卡顿不是 cm MITM 问题后，已还原到 1.1.4/1.1.2 行为，仅升版本号到 1.1.7 便于更新。
-
-
-- **取消** `DOMAIN,cm.bilibili.com,REJECT`
-- **不**对 cm 做 Map Local 空返回（1.1.3 已回退；版本号升到 1.1.4 方便 Surge 直接更新）
-- 其它去广告逻辑保持
-
-安装：
-
-```text
-https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bilibili-adblock.sgmodule
-```
-
-
-
-## 视频能播、简介/评论一直骨架屏？
-
-这通常**不是**“B站被改去代理”。
-
-本模块 **没有** `PROXY` / 策略组规则，不会强制 B 站走代理。  
-更常见原因：
-
-1. 详情页 `View` gRPC 被 **protobuf 脚本全量改写**（CPU/时延高）→ 下方简介/评论等主接口回来了也渲染慢  
-2. `api/app.biliapi.*` 被 **整域 REJECT** → 备用 API 失败重试  
-3. 同时开了多个 B 站模块 + 全局 MITM，叠加更卡
-
-v1.1.5 已：
-- 去掉 `bili-proto`
-- 去掉 `biliapi.*` 整域 REJECT
-- 保留普通广告 Map Local / JSON 去广告
-
-
-
-## 日志：cm.bilibili.com certificate pinning
-
-若出现：
-
-```text
-Client closed connection just after TLS handshake
-it might because of certificate pinning
-Host: cm.bilibili.com:443
-```
-
-说明 B 站对 `cm.bilibili.com` 做了证书锁定。  
-对该域做 MITM 时，握手后客户端会主动断开；广告组件等待失败时，详情/评论可能一直骨架屏。
-
-### v1.1.6 策略
-
-- **不 MITM** `cm.bilibili.com`（直连，避免 pinning 冲突）
-- **不整域 REJECT** `cm.bilibili.com`
-- 其它广告 Map Local / JSON 仍保留
-- 模块仍**不含代理策略**
-
+请在 **`dev`** 分支开发与提交，不要直接往 `main` 推实验改动。稳定后再合并到 `main`。
 
 ## License
 
-MIT
+[GNU Affero General Public License v3.0](LICENSE)
+
+Copyright (c) 2026 babana0091-sudo

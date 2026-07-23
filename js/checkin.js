@@ -5,7 +5,8 @@
 //   First success of that Beijing day marks lastRunOk; later slots no-op.
 //
 // Tasks (VIP only; non-VIP skipped with log only, no notification):
-// 0) detect VIP via x/web-interface/nav (fallback x/vip/web/user/info)
+// 0) VIP probe when session exists: cookie capture / network-changed / cron-start
+//    + again before sign tasks via x/web-interface/nav (fallback x/vip/web/user/info)
 // 1) live DoSign
 // 2) 大积分签到 POST /pgc/activity/score/task/sign
 // 3) exp/reward status
@@ -171,6 +172,82 @@ async function detectVipStatus(baseHeaders) {
   return { isVip: false, detail: "detect failed / not vip" };
 }
 
+function buildAuthHeaders(store) {
+  const cookie = (store && store.cookie) || "";
+  return {
+    Cookie: cookie,
+    "User-Agent":
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BiliApp",
+    Referer: "https://www.bilibili.com/",
+    Origin: "https://www.bilibili.com",
+  };
+}
+
+/**
+ * Extra VIP check when session (Cookie) exists.
+ * reason: session-ready | network-changed | cron-start | manual
+ * Only logs via console.log; never $notification.
+ * Throttle: same Beijing day + checked within 30min → skip (unless force).
+ */
+async function probeVipIfSession(opts, reason, force) {
+  opts = opts || parseArgs(typeof $argument !== "undefined" ? $argument : "");
+  if (opts && opts.自动签到 === false) {
+    log("vip probe skip: checkin disabled", reason || "");
+    return null;
+  }
+  const store = readStore();
+  if (!store.cookie || !String(store.cookie).includes("SESSDATA")) {
+    log("vip probe skip: no session cookie", reason || "");
+    return null;
+  }
+  const now = Date.now();
+  const last = store.vipCheckedAt ? Date.parse(store.vipCheckedAt) : 0;
+  const day = today();
+  // Throttle noisy paths; force bypasses
+  if (
+    !force &&
+    store.vipProbeDay === day &&
+    last &&
+    now - last < 30 * 60 * 1000 &&
+    reason !== "session-ready"
+  ) {
+    log(
+      "vip probe skip: throttled",
+      reason || "",
+      "last",
+      store.vipCheckedAt,
+      "isVip",
+      store.isVip
+    );
+    return { isVip: !!store.isVip, detail: store.vipDetail || "cached", cached: true };
+  }
+  // session-ready: allow on cookie change or if never checked / >30min
+  if (
+    !force &&
+    reason === "session-ready" &&
+    last &&
+    now - last < 30 * 60 * 1000 &&
+    store.vipProbeDay === day
+  ) {
+    log("vip probe skip: session already probed recently", store.vipCheckedAt);
+    return { isVip: !!store.isVip, detail: store.vipDetail || "cached", cached: true };
+  }
+
+  const vip = await detectVipStatus(buildAuthHeaders(store));
+  store.vipCheckedAt = new Date().toISOString();
+  store.vipProbeDay = day;
+  store.vipProbeReason = reason || "";
+  store.isVip = !!vip.isVip;
+  store.vipDetail = vip.detail || "";
+  writeStore(store);
+  log(
+    "vip probe (" + (reason || "?") + "):",
+    vip.isVip ? "YES" : "NO",
+    vip.detail || ""
+  );
+  return vip;
+}
+
 function http(method, url, headers, body) {
   return new Promise((resolve) => {
     const opt = { url, headers: headers || {}, timeout: 15 };
@@ -294,6 +371,14 @@ async function captureCookie(opts) {
     notify(NAME, "Cookie 已更新", "将用于每日自动签到");
     log("cookie updated", store.uid || "");
   }
+  // Session 存在：插件/会话就绪时额外检查一次会员（仅日志）
+  if (store.cookie && String(store.cookie).includes("SESSDATA")) {
+    try {
+      await probeVipIfSession(opts, changed ? "session-ready" : "session-exists", !!changed);
+    } catch (e) {
+      log("vip probe on capture err", e);
+    }
+  }
   $done({});
 }
 
@@ -308,6 +393,14 @@ async function doCheckin(opts) {
     log("auto checkin disabled");
     $done({});
     return;
+  }
+
+  // Session 存在 + cron/任务被拉起：先额外做一次会员检测（仅日志，节流）
+  // 不依赖是否处于 0/10/19/21 签到窗
+  try {
+    await probeVipIfSession(opts, "cron-start", false);
+  } catch (e) {
+    log("vip probe on cron-start err", e);
   }
 
   // Beijing calendar day + hour slots (not device local TZ).
@@ -533,9 +626,18 @@ async function doCheckin(opts) {
 
 (async () => {
   const opts = parseArgs(typeof $argument !== "undefined" ? $argument : "");
-  // Surge distinguishes request vs cron by $request
+  const stype =
+    typeof $script !== "undefined" && $script && $script.type
+      ? String($script.type)
+      : "";
+  // Surge: http-request = capture; event = network-changed boot probe; else cron checkin
   if (typeof $request !== "undefined" && $request && $request.url) {
-    await captureCookie(parseArgs(typeof $argument !== "undefined" ? $argument : ""));
+    await captureCookie(opts);
+  } else if (stype === "event") {
+    // 插件/网络环境变化时：Session 存在则额外检查会员（仅日志）
+    log("event start", stype, "probe vip if session");
+    await probeVipIfSession(opts, "network-changed", false);
+    $done({});
   } else {
     await doCheckin(opts);
   }

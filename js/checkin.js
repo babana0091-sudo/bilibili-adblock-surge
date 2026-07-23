@@ -1,6 +1,6 @@
 // Bilibili daily check-in for Surge (network only)
 // - type=http-request: capture Cookie / bili_app_token (URL access_key)
-// - type=cron: hourly tick; only act at Beijing 00/10/19/21 + 22:40/22
+// - open-app: hourly tick; only act at Beijing 00/10/19/21 + 22:40/22
 //   Day key + slots use Asia/Shanghai (UTC+8), not device local TZ.
 //   First success of that Beijing day marks lastRunOk; later slots no-op.
 //
@@ -381,14 +381,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Random delay before sign APIs (anti 整点扎堆).
- * MUST stay well under Surge cron script timeout (module: 180s).
- * Old 45s–8min caused: Script timeout: bili-checkin-cron
- */
+/** Short jitter when opening App (avoid burst; keep request path snappy). */
 function randomCheckinDelayMs() {
-  const min = 15 * 1000;  // 15s
-  const max = 90 * 1000;  // 90s
+  const min = 500;
+  const max = 3000;
   return min + Math.floor(Math.random() * (max - min + 1));
 }
 
@@ -427,11 +423,20 @@ function shortRequestLabel(rawUrl) {
   }
 }
 
+
+/** Only run sign-in on bootstrap-ish App requests (not feed scroll). */
+function isCheckinTriggerUrl(rawUrl) {
+  const u = String(rawUrl || "");
+  return /app\.bilibili\.com\/x\/(?:resource\/(?:fingerprint|show\/(?:tab|skin))|v2\/(?:account\/(?:myinfo|mine)|splash\/)|v2\/splash)/i.test(
+    u
+  ) || /api\.bilibili\.com\/x\/web-interface\/nav/i.test(u) || /passport\.bilibili\.com\/x\/passport-login/i.test(u);
+}
+
 async function captureCookie(opts) {
   opts = opts || parseArgs(typeof $argument !== "undefined" ? $argument : "");
   if (!opts.自动签到) {
     log("capture skip: checkin=false");
-    $done({});
+    /* done by entry */
     return;
   }
   const url = ($request && $request.url) || "";
@@ -567,7 +572,7 @@ async function captureCookie(opts) {
   // - 同一天最多 2 次（token 一次 + cookie 一次）
   // - 次日：对应类型在凭证再次变化时才可再通知
   if (!sessionChanged || (!tokenChanged && !cookieChanged)) {
-    $done({});
+    /* done by entry */
     return;
   }
 
@@ -576,7 +581,7 @@ async function captureCookie(opts) {
     (store.bili_app_token && String(store.bili_app_token).length > 8)
   );
   if (!hasSession) {
-    $done({});
+    /* done by entry */
     return;
   }
 
@@ -600,7 +605,7 @@ async function captureCookie(opts) {
       "tokenNotifiedToday=" + tokenNotifiedToday,
       "cookieNotifiedToday=" + cookieNotifiedToday
     );
-    $done({});
+    /* done by entry */
     return;
   }
 
@@ -699,83 +704,71 @@ async function captureCookie(opts) {
     "localDay=" + localDay,
     parts.join(" | ")
   );
-  $done({});
+  /* done by entry */
 }
 
-async function doCheckin(opts) {
+async function doCheckin(opts, flags) {
+  flags = flags || {};
+  const fromOpen = !!flags.fromOpen;
   const store = readStore();
   const hasCookie = !!(store.cookie && String(store.cookie).includes("SESSDATA"));
   const hasAK = !!(store.bili_app_token && String(store.bili_app_token).length > 8);
-  if (!hasCookie && !hasAK) {
-    // Throttle "no session" notifications: at most once per 6 hours
-    const lastN = store.lastNoSessionNotifyAt
-      ? Date.parse(store.lastNoSessionNotifyAt)
-      : 0;
-    if (!lastN || Date.now() - lastN > 6 * 3600 * 1000) {
-      store.lastNoSessionNotifyAt = new Date().toISOString();
-      writeStore(store);
-      notify(
-        NAME,
-        "未捕获登录态",
-        "请打开 B 站并浏览一下（含直播/动态等），以便抓取 Cookie(SESSDATA)。仅 access_key 无法完成 Web 签到（会 -663）"
-      );
-    } else {
-      log("no session, notify throttled");
-    }
-    $done({});
-    return;
-  }
   if (!opts.自动签到) {
     log("auto checkin disabled");
-    $done({});
-    return;
+    if (!fromOpen) $done({});
+    return { ok: false, skipped: true };
+  }
+  if (!hasCookie && !hasAK) {
+    const msg =
+      "未捕获登录态：请打开 B 站浏览（直播/动态等）以抓取 Cookie(SESSDATA)。仅 access_key 无法 Web 签到";
+    log(msg);
+    // 失败立刻通知（节流：同一本地日最多 1 次无会话提示）
+    const localDay = deviceLocalDay();
+    if (store.noSessionFailNotifyDay !== localDay) {
+      store.noSessionFailNotifyDay = localDay;
+      writeStore(store);
+      notify(NAME, "签到失败", msg);
+    }
+    if (!fromOpen) $done({});
+    return { ok: false, failed: true };
+  }
+
+  const day = today(); // Asia/Shanghai YYYY-MM-DD
+  if (store.lastRunDay === day && store.lastRunOk) {
+    log("already succeeded Beijing day, skip", day);
+    if (!fromOpen) $done({});
+    return { ok: true, skipped: true };
+  }
+
+  // 打开 App 时：失败后 15 分钟内不重复打接口（仍可当天再试）
+  if (fromOpen && store.lastAttemptAt) {
+    const lastA = Date.parse(store.lastAttemptAt);
+    if (lastA && Date.now() - lastA < 15 * 60 * 1000 && store.lastRunDay === day) {
+      log("checkin throttle 15m after attempt", store.lastAttemptAt);
+      if (!fromOpen) $done({});
+      return { ok: false, skipped: true };
+    }
   }
 
   log(
     "auth mode",
     hasCookie ? "cookie+SESSDATA" : "access_key-only",
-    "token=" + (hasAK ? "yes" : "no")
+    "token=" + (hasAK ? "yes" : "no"),
+    "fromOpen=" + fromOpen
   );
-  // Session 存在 + cron 拉起：会员检测（仅日志，节流）— 不在 http-request 路径
   try {
-    await probeVipIfSession(opts, "cron-start", false);
+    await probeVipIfSession(opts, fromOpen ? "open-app" : "manual", false);
   } catch (e) {
-    log("vip probe on cron-start err", e);
+    log("vip probe err", e);
   }
 
-  // Beijing calendar day + hour slots (not device local TZ).
-  if (!isCheckinHourBeijing()) {
-    log("skip: not Beijing check-in hour", beijingParts());
-    $done({});
-    return;
-  }
-
-  const day = today(); // Asia/Shanghai YYYY-MM-DD
-  // Same Beijing day + already succeeded: skip remaining 0/10/19/21 + 22:40 slots.
-  // Next Beijing midnight: day string changes => runs again (once per BJ day, not forever).
-  if (store.lastRunDay === day && store.lastRunOk) {
-    log("already succeeded Beijing day, skip slot", day);
-    $done({});
-    return;
-  }
-
-  // Avoid整点批量：北京时间时段内再随机延迟一段时间
+  // 短抖动，避免一打开就扎堆（远小于旧 cron 延迟）
   const delayMs = randomCheckinDelayMs();
-  log("random delay ms", delayMs, "(cron timeout budget ~180s)", "bj", beijingParts());
+  log("open-app checkin jitter ms", delayMs, "bj", beijingParts());
   await sleep(delayMs);
 
-  // Re-check after delay: day/hour may have changed; still only act in slot hours
-  if (!isCheckinHourBeijing()) {
-    log("after delay: left check-in hour, skip", beijingParts());
-    $done({});
-    return;
-  }
-  const dayAfter = today();
-  if (store.lastRunDay === dayAfter && store.lastRunOk) {
-    log("after delay: already succeeded", dayAfter);
-    $done({});
-    return;
-  }
+  store.lastAttemptAt = new Date().toISOString();
+  writeStore(store);
 
   const cookie = store.cookie || "";
   const csrf = store.csrf || cookieMap(cookie).bili_jct || "";
@@ -986,9 +979,15 @@ async function doCheckin(opts) {
   store.lastResult = lines.join(" | ");
   writeStore(store);
 
-  notify(NAME, okAny ? "完成" : "部分失败", lines.join("\n"));
-  log(lines.join(" | "));
-  $done({});
+  // 失败立刻通知；成功也通知一次（当天成功后不会再跑）
+  if (!okAny) {
+    notify(NAME, "签到失败", lines.join("\n") || "未知错误");
+  } else {
+    notify(NAME, "签到完成", lines.join("\n"));
+  }
+  log("checkin done", okAny ? "ok" : "fail", lines.join(" | "));
+  if (!fromOpen) $done({});
+  return { ok: okAny, lines: lines };
 }
 
 (async () => {
@@ -1004,7 +1003,7 @@ async function doCheckin(opts) {
   const store0 = readStore();
   const hasSession = !!(
     (store0.cookie && String(store0.cookie).includes("SESSDATA")) ||
-    (store0.access_key && String(store0.access_key).length > 8)
+    (store0.bili_app_token && String(store0.bili_app_token).length > 8)
   );
   // 任何触发都必须先打这条，方便在 Surge 日志里确认脚本真的跑了
   log(
@@ -1017,20 +1016,33 @@ async function doCheckin(opts) {
     "bj=" + JSON.stringify(beijingParts())
   );
 
-  // Surge: http-request = capture; event = network-changed; else cron/manual
+  // 无定时任务：打开 B 站时 capture + 尝试签到；失败立即通知
   if (typeof $request !== "undefined" && $request && $request.url) {
-    log("path=capture", String($request.url).slice(0, 120));
-    await captureCookie(opts);
-  } else if (stype === "event") {
-    log("path=event network-changed, probe vip if session");
-    if (!hasSession) {
-      log("event: no session yet — open Bilibili app once to capture Cookie");
+    const reqUrl = String($request.url);
+    log("path=open-app capture", reqUrl.slice(0, 120));
+    try {
+      await captureCookie(opts);
+    } catch (e) {
+      log("capture err", e);
     }
+    // 轻量启动类请求上尝试签到，避免刷 feed 时拖慢
+    try {
+      if (opts.自动签到 && isCheckinTriggerUrl(reqUrl)) {
+        log("path=open-app try checkin");
+        await doCheckin(opts, { fromOpen: true });
+      }
+    } catch (e) {
+      log("open-app checkin err", e);
+      notify(NAME, "签到失败", String(e));
+    }
+    $done({});
+  } else if (stype === "event") {
+    log("path=event network-changed");
     await probeVipIfSession(opts, "network-changed", false);
     $done({});
   } else {
-    log("path=cron/manual doCheckin");
-    await doCheckin(opts);
+    log("path=manual doCheckin");
+    await doCheckin(opts, { fromOpen: false });
   }
 })().catch((e) => {
   log("fatal", e);

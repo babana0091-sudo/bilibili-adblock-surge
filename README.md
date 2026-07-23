@@ -50,13 +50,12 @@ https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bi
 | `checkin` | true | 自动签到 |
 | `silver2coin` | false | 银瓜子换硬币 |
 | `block_risk` | false | 拦截 Gaia 风控上报 |
-| `reset` | false | **重新签到**：设为 `true` 强制再签一次，成功后请改回 `false` |
 | `debug` | false | 调试日志 |
 
 ## 自动签到说明
 
 1. 启用 `checkin` 后，打开哔哩哔哩 App 首页一次，模块会捕获登录态（App 侧多为 `access_key`，不一定有浏览器 Cookie）。
-2. 打开哔哩哔哩 App 时自动尝试签到（**无定时任务**）；**北京时间当天成功一次后**当天不再重复。
+2. 打开哔哩哔哩 App 时后台自动签到；失败记录待办并半小时起退避重试（不跨北京日）（**无定时任务**）；**北京时间当天成功一次后**当天不再重复。
 3. 签到**失败会立即通知**；成功也会通知一次。
 4. - 请使用官方 Surge，并保持模块与脚本资源可正常访问 GitHub raw。
 - 若首页或播放异常，可先关闭本模块对照，再检查是否开启了全局 MITM 抓包（`*`）等额外配置。

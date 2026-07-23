@@ -1,23 +1,12 @@
 // Bilibili daily check-in for Surge (network only)
-// - type=http-request: capture Cookie / bili_app_token (URL access_key)
-// - open-app: hourly tick; only act at Beijing 00/10/19/21 + 22:40/22
-//   Day key + slots use Asia/Shanghai (UTC+8), not device local TZ.
-//   First success of that Beijing day marks lastRunOk; later slots no-op.
-//
-// Tasks (VIP only; non-VIP skipped with log only, no notification):
-// 0) VIP on capture notify + cron; session = Cookie or bili_app_token
-//    + again before sign tasks via x/web-interface/nav (fallback x/vip/web/user/info)
-// 1) live DoSign
-// 2) 大积分签到 POST /pgc/activity/score/task/sign
-// 3) exp/reward status
-// 4) vip privilege receive (optional)
-// 5) silver2coin (optional)
-// Random delay before tasks to avoid整点风控
-//
-// Storage key: bili_adblock_checkin
+// - open App → capture session → background checkin (non-blocking)
+// - Beijing day success key: dayOk (store key v2, old lastRunOk discarded)
+// - Failures: record pending items; backoff 30m → 1h → 2h … never cross BJ midnight
+// - Tasks: 大积分 / 经验分享 / 福利 / 可选银瓜子；直播签到已下线
+// Storage: bili_adblock_checkin_v2
 
-const STORE_KEY = "bili_adblock_checkin";
-const SCRIPT_VERSION = "2.0.7";
+const STORE_KEY = "bili_adblock_checkin_v2"; // v2: 换键丢弃旧 lastRunOk，避免误标成功导致不再签
+const SCRIPT_VERSION = "2.0.8";
 const NAME = "哔哩签到";
 
 function parseArgs(raw) {
@@ -25,14 +14,11 @@ function parseArgs(raw) {
     自动签到: true,
     银瓜子换硬币: false,
     调试日志: false,
-    重新签到: false, // maps from reset
     checkin: true,
     silver2coin: false,
-    reset: false,
     debug: false,
   };
-  if (raw == null || raw === "")   if (out.reset !== undefined) out.重新签到 = !!out.reset;
-return out;
+  if (raw == null || raw === "") return out;
   let src = raw;
   if (typeof raw === "string") {
     try {
@@ -738,6 +724,38 @@ async function captureCookie(opts) {
   /* done by entry */
 }
 
+
+/** Beijing day state for success + failure retry (never span midnight). */
+function dayState(store, day) {
+  if (!store.dayState || store.dayState.day !== day) {
+    store.dayState = {
+      day: day,
+      ok: false, // 当天是否已成功（新键，不是旧 lastRunOk）
+      pending: [], // 失败待重试项 e.g. ["bigpoint","share"]
+      failCount: 0,
+      lastAttemptAt: "",
+      nextRetryAt: 0, // epoch ms
+      lastResult: "",
+    };
+  }
+  return store.dayState;
+}
+
+/** Backoff after fail: 30m, 1h, 2h, 4h… but never past Beijing next midnight. */
+function computeNextRetryMs(failCount, nowMs) {
+  // failCount 1 → 30m, 2 → 1h, 3 → 2h, 4 → 4h …
+  const mins = failCount <= 1 ? 30 : 30 * Math.pow(2, failCount - 1);
+  let wait = mins * 60 * 1000;
+  // Cap so next retry is still same Beijing calendar day (before next 00:00 CST)
+  const p = beijingParts(new Date(nowMs));
+  // minutes until BJ midnight
+  const minsLeft = (23 - p.hour) * 60 + (59 - (p.minute || 0));
+  const maxWait = Math.max(0, minsLeft * 60 * 1000 - 60 * 1000); // leave 1min margin
+  if (maxWait <= 0) return nowMs + 60 * 1000; // almost midnight: try once more soon or day flips
+  if (wait > maxWait) wait = maxWait;
+  return nowMs + wait;
+}
+
 async function doCheckin(opts, flags) {
   flags = flags || {};
   const fromOpen = !!flags.fromOpen;
@@ -765,43 +783,27 @@ async function doCheckin(opts, flags) {
   }
 
   const day = today(); // Asia/Shanghai YYYY-MM-DD
-  // reset=true：强制重签。脚本无法改写模块参数 UI，用本地存储做「只生效一次」：
-  // - 检测到 reset=true 且尚未消费 → 清 lastRunOk 并签一次，标记已消费
-  // - 保持 true 不会反复强制；改回 false 会清除消费标记，下次再 true 可再强制
-  const resetOn = !!(opts.重新签到 || opts.reset);
-  let forceResign = false;
-  if (!resetOn) {
-    if (store.resetConsumed) {
-      store.resetConsumed = false;
-      writeStore(store);
-      log("reset=false: clear one-shot consume flag");
-    }
-  } else if (resetOn && !store.resetConsumed) {
-    forceResign = true;
-    store.resetConsumed = true; // one-shot; 等同「自动用掉」这次 true
-    store.lastRunOk = false;
-    store.lastRunDay = "";
-    store.lastAttemptAt = "";
-    writeStore(store);
-    log("reset=true one-shot: force re-checkin (param UI cannot auto-set false; leave true is OK, will not re-force until toggled)");
-  } else if (resetOn && store.resetConsumed) {
-    log("reset=true already consumed this toggle; normal skip rules apply");
-  }
+  const st = dayState(store, day);
+  writeStore(store); // persist day flip clear
 
-  if (!forceResign && store.lastRunDay === day && store.lastRunOk) {
-    log("already succeeded Beijing day, skip", day);
+  // 当天已成功 → 不再签（新键 dayState.ok；旧 lastRunOk 已随 store key 作废）
+  if (st.ok) {
+    log("already ok Beijing day, skip", day);
     if (!fromOpen) $done({});
     return { ok: true, skipped: true };
   }
 
-  // 打开 App 时：失败后 15 分钟内不重复打接口（仍可当天再试）
-  if (fromOpen && store.lastAttemptAt) {
-    const lastA = Date.parse(store.lastAttemptAt);
-    if (lastA && Date.now() - lastA < 15 * 60 * 1000 && store.lastRunDay === day) {
-      log("checkin throttle 15m after attempt", store.lastAttemptAt);
-      if (!fromOpen) $done({});
-      return { ok: false, skipped: true };
-    }
+  // 失败退避：保护期 / 下次可重试时间（不跨北京日）
+  const nowMs = Date.now();
+  if (st.nextRetryAt && nowMs < st.nextRetryAt) {
+    log(
+      "backoff protect",
+      "failCount=" + st.failCount,
+      "nextRetryAt=" + new Date(st.nextRetryAt).toISOString(),
+      "pending=" + (st.pending || []).join(",")
+    );
+    if (!fromOpen) $done({});
+    return { ok: false, skipped: true, backoff: true };
   }
 
   log(
@@ -826,7 +828,7 @@ async function doCheckin(opts, flags) {
   log("checkin jitter ms", delayMs, "fromOpen=" + fromOpen, "bj", beijingParts());
   await sleep(delayMs);
 
-  store.lastAttemptAt = new Date().toISOString();
+  st.lastAttemptAt = new Date().toISOString();
   writeStore(store);
 
   const cookie = store.cookie || "";
@@ -1115,31 +1117,65 @@ async function doCheckin(opts, flags) {
     }
   }
 
-  // treat already-done privilege as non-failure; success if any okAny
-  // hardFail only forces failure notify if nothing ok
-
-  store.lastRunDay = day;
-  store.lastRunOk = !!okAny; // 只有真正成功才 true；失败必须 false，否则不再自动签
-  if (!okAny) store.lastRunOk = false;
-  store.lastResult = lines.join(" | ");
-  store.lastHardFail = !!hardFail && !okAny;
-  writeStore(store);
-
-  // 失败立刻通知；成功通知一次
-  if (!okAny) {
-    // 明确失败：绝不能 lastRunOk（已在上面按 okAny 写入）
-    notify(NAME, "签到失败", lines.join("\n") || "未知错误");
-  } else {
-    let extra = "";
-    if (forceResign) {
-      extra =
-        "\n\n已强制重签一次（reset 一次性生效）。脚本无法自动改模块参数，请把 reset 改回 false；若一直 true 也不会重复强制。";
-    }
-    notify(NAME, "签到完成", lines.join("\n") + extra);
+  // ---- 汇总：成功键 dayState.ok；失败记 pending + 退避 ----
+  // 解析 lines 粗分 pending 项（大积分/分享）
+  const pending = [];
+  const textAll = lines.join("\n");
+  if (/大积分签到: 失败|大积分签到: 异常|大积分签到: 跳过（无 Cookie/i.test(textAll)) {
+    pending.push("bigpoint");
   }
-  log("checkin done", okAny ? "ok" : "fail", lines.join(" | "));
+  if (/经验任务: 分享失败|经验任务:.*分享✗|经验任务: 异常/i.test(textAll)) {
+    pending.push("share");
+  }
+  // 无 Cookie 时两项都可能挂
+  if (/无 Cookie\/SESSDATA/i.test(textAll) && pending.indexOf("bigpoint") < 0) {
+    pending.push("bigpoint");
+  }
+
+  // 成功定义：大积分成功/已签，或分享成功，或银瓜子成功；仅登录/观看/已领福利不算整天成功
+  const realOk =
+    /大积分签到: 成功|大积分签到: 今日已签/i.test(textAll) ||
+    /经验任务: 分享成功|经验任务:.*分享✓|分享已完成/i.test(textAll) ||
+    /银瓜子换硬币: 成功/i.test(textAll) ||
+    (!!okAny && pending.length === 0 && !hardFail);
+
+  st.lastResult = lines.join(" | ");
+  st.lastAttemptAt = new Date().toISOString();
+
+  if (realOk && pending.length === 0) {
+    st.ok = true;
+    st.pending = [];
+    st.failCount = 0;
+    st.nextRetryAt = 0;
+    writeStore(store);
+    notify(NAME, "签到完成", lines.join("\n"));
+    log("checkin done ok", day, lines.join(" | "));
+  } else {
+    st.ok = false;
+    st.pending = pending.length ? pending : hardFail ? ["unknown"] : st.pending || [];
+    st.failCount = (st.failCount || 0) + 1;
+    st.nextRetryAt = computeNextRetryMs(st.failCount, Date.now());
+    writeStore(store);
+    const nextStr = new Date(st.nextRetryAt).toISOString();
+    const body =
+      (lines.join("\n") || "未知错误") +
+      "\n\n待重试: " +
+      (st.pending.join(",") || "-") +
+      "\n下次最早: " +
+      nextStr +
+      "（退避不跨北京日，次日清零）";
+    notify(NAME, "签到失败", body);
+    log(
+      "checkin done fail",
+      "failCount=" + st.failCount,
+      "pending=" + st.pending.join(","),
+      "next=" + nextStr,
+      lines.join(" | ")
+    );
+  }
+
   if (!fromOpen) $done({});
-  return { ok: okAny, lines: lines };
+  return { ok: !!st.ok, lines: lines, pending: st.pending };
 }
 
 (async () => {

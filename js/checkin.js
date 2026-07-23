@@ -6,7 +6,7 @@
 // Storage: bili_adblock_checkin_v2
 
 const STORE_KEY = "bili_adblock_checkin_v2"; // v2: 换键丢弃旧 lastRunOk，避免误标成功导致不再签
-const SCRIPT_VERSION = "2.0.11";
+const SCRIPT_VERSION = "2.0.12";
 const NAME = "哔哩签到";
 
 function parseArgs(raw) {
@@ -783,58 +783,108 @@ function computeNextRetryMs(failCount, nowMs) {
 }
 
 
-/** In-process open-app session: first N capture requests only capture, no checkin. */
+
+/** Open-app: first N captures skip checkin; only one winner may checkin per open session. */
 const OPEN_SKIP_CHECKIN_FIRST_N = 10;
-const CHECKIN_LOCK_TTL_MS = 3 * 60 * 1000; // stale lock auto-expire
+const CHECKIN_LOCK_TTL_MS = 3 * 60 * 1000;
+const OPEN_SESSION_GAP_MS = 90 * 1000;
+
+function randomToken() {
+  return (
+    Date.now().toString(36) +
+    "_" +
+    Math.floor(Math.random() * 1e9).toString(36) +
+    "_" +
+    Math.floor(Math.random() * 1e9).toString(36)
+  );
+}
 
 function touchOpenSession(store) {
   const now = Date.now();
-  // 新一轮打开：距上次 capture > 90s 则重置计数
   const last = store.openSessionAt ? Date.parse(store.openSessionAt) : 0;
-  if (!last || now - last > 90 * 1000) {
+  if (!last || now - last > OPEN_SESSION_GAP_MS) {
     store.openSessionAt = new Date().toISOString();
     store.openReqCount = 0;
+    store.openCheckinClaimed = false;
+    store.openCheckinClaimToken = "";
   }
   store.openReqCount = (store.openReqCount || 0) + 1;
   store.openSessionAt = new Date().toISOString();
   return store.openReqCount;
 }
 
+/**
+ * Claim the single "may run checkin" slot for this open session.
+ * First writer wins; others skip entirely (no notify).
+ */
+function tryClaimOpenCheckin(store) {
+  // re-read for fresher flag
+  const s = readStore();
+  // keep session counters from caller store if newer
+  if (store.openReqCount && (!s.openReqCount || store.openReqCount >= s.openReqCount)) {
+    s.openReqCount = store.openReqCount;
+    s.openSessionAt = store.openSessionAt || s.openSessionAt;
+  }
+  if (s.openCheckinClaimed) {
+    log("open checkin already claimed by another request");
+    return { ok: false, store: s, token: "" };
+  }
+  const token = randomToken();
+  s.openCheckinClaimed = true;
+  s.openCheckinClaimToken = token;
+  writeStore(s);
+  // verify we still own the claim (best-effort under concurrent scripts)
+  const v = readStore();
+  if (v.openCheckinClaimToken !== token) {
+    log("open checkin claim lost race", "mine=" + token, "theirs=" + (v.openCheckinClaimToken || ""));
+    return { ok: false, store: v, token: "" };
+  }
+  log("open checkin claimed", token);
+  return { ok: true, store: v, token: token };
+}
+
+/** Lock with token; verify after write to reduce double-run. */
 function tryAcquireCheckinLock(store, reason) {
   const now = Date.now();
-  const until = store.checkinLockUntil || 0;
-  if (until && now < until) {
+  const cur = readStore();
+  const until = cur.checkinLockUntil || 0;
+  const owner = cur.checkinLockToken || "";
+  if (until && now < until && owner) {
     log(
       "checkin lock busy",
       "reason=" + reason,
       "until=" + new Date(until).toISOString(),
-      "holder=" + (store.checkinLockBy || "?")
+      "holder=" + (cur.checkinLockBy || "?")
     );
-    return false;
+    return { ok: false, token: "", store: cur };
   }
-  store.checkinLockUntil = now + CHECKIN_LOCK_TTL_MS;
-  store.checkinLockBy = reason || "checkin";
-  store.checkinLockAt = new Date().toISOString();
-  writeStore(store);
-  log("checkin lock acquired", store.checkinLockBy, "ttlMs=" + CHECKIN_LOCK_TTL_MS);
-  return true;
+  const token = randomToken();
+  cur.checkinLockUntil = now + CHECKIN_LOCK_TTL_MS;
+  cur.checkinLockBy = reason || "checkin";
+  cur.checkinLockAt = new Date().toISOString();
+  cur.checkinLockToken = token;
+  writeStore(cur);
+  const v = readStore();
+  if (v.checkinLockToken !== token) {
+    log("checkin lock lost race", "mine=" + token, "theirs=" + (v.checkinLockToken || ""));
+    return { ok: false, token: "", store: v };
+  }
+  log("checkin lock acquired", reason, "token=" + token);
+  return { ok: true, token: token, store: v };
 }
 
-function releaseCheckinLock(store, reason) {
+function releaseCheckinLock(token, reason) {
   try {
-    // re-read to avoid clobbering concurrent writes as much as possible
     const s = readStore();
+    // only owner clears (avoid A release wiping B's lock)
+    if (token && s.checkinLockToken && s.checkinLockToken !== token) {
+      log("checkin lock release skipped (not owner)", reason || "");
+      return;
+    }
     s.checkinLockUntil = 0;
     s.checkinLockBy = "";
     s.checkinLockAt = "";
-    // merge dayState etc from store if fresher? keep s then overlay critical from store
-    if (store && store.dayState) s.dayState = store.dayState;
-    if (store && store.cookie) {
-      s.cookie = store.cookie;
-      s.csrf = store.csrf;
-      s.uid = store.uid;
-      s.bili_app_token = store.bili_app_token;
-    }
+    s.checkinLockToken = "";
     writeStore(s);
     log("checkin lock released", reason || "");
   } catch (e) {
@@ -854,14 +904,15 @@ async function doCheckin(opts, flags) {
     if (!fromOpen) $done({});
     return { ok: false, skipped: true };
   }
-  // 互斥：同一时刻只允许一个签到任务（persistentStore 锁 + TTL）
-  if (!tryAcquireCheckinLock(store, fromOpen ? "open-app" : "manual")) {
+  // 互斥：token 锁 + 写后校验，降低并发双跑
+  const lock = tryAcquireCheckinLock(store, fromOpen ? "open-app" : "manual");
+  if (!lock.ok) {
     if (!fromOpen) $done({});
     return { ok: false, skipped: true, locked: true };
   }
   lockHeld = true;
-  // refresh store after lock write
-  store = readStore();
+  const lockToken = lock.token;
+  store = lock.store || readStore();
   try {
   if (!hasCookie && !hasAK) {
     const msg =
@@ -1023,6 +1074,20 @@ async function doCheckin(opts, flags) {
         ) {
           okAny = true;
           lines.push("大积分签到: 今日已签 (" + (j.code != null ? j.code : "") + ")");
+        } else if (
+          j.code === 6007000 &&
+          /已签|重复|今日|刷新重试|请勿重复/i.test(msg)
+        ) {
+          // 并发双跑时后发的常返回 6007000「请刷新重试」——若已有成功态则当已签
+          const stNow = dayState(store, day);
+          if (stNow.ok || /已签|重复|今日/i.test(msg)) {
+            okAny = true;
+            lines.push("大积分签到: 今日已签/并发重复 (" + j.code + " " + msg + ")");
+          } else {
+            hardFail = true;
+            lines.push("大积分签到: 失败 code=" + j.code + " " + msg);
+            log("bigpoint sign2 raw", String(r.data || "").slice(0, 200));
+          }
         } else if (j.code === -663) {
           hardFail = true;
           lines.push(
@@ -1229,7 +1294,11 @@ async function doCheckin(opts, flags) {
   // 解析 lines 粗分 pending 项（大积分/分享）
   const pending = [];
   const textAll = lines.join("\n");
-  if (/大积分签到: 失败|大积分签到: 异常|大积分签到: 跳过（无 Cookie/i.test(textAll)) {
+  // 已成功/已签 不算失败项
+  const bigpointFailed =
+    /大积分签到: 失败|大积分签到: 异常|大积分签到: 跳过（无 Cookie/i.test(textAll) &&
+    !/大积分签到: 成功|大积分签到: 今日已签/i.test(textAll);
+  if (bigpointFailed) {
     pending.push("bigpoint");
   }
   if (/经验任务: 分享失败|经验任务:.*分享✗|经验任务: 异常/i.test(textAll)) {
@@ -1292,7 +1361,7 @@ async function doCheckin(opts, flags) {
     if (!fromOpen) $done({});
     return { ok: false, error: String(e) };
   } finally {
-    if (lockHeld) releaseCheckinLock(store, fromOpen ? "open-app" : "manual");
+    if (lockHeld) releaseCheckinLock(typeof lockToken !== "undefined" ? lockToken : "", fromOpen ? "open-app" : "manual");
   }
 }
 
@@ -1352,19 +1421,27 @@ async function doCheckin(opts, flags) {
       $done({});
       return;
     }
-    // 第 N+1 个请求起：尝试签到一次（不要求必须是 trigger URL，否则 trigger 全在前 N 会永远不签）
-    // 互斥锁保证并发只会真正执行一个
-    const should = !!opts.自动签到;
-    if (should) {
-      log("path=open-app checkin on req#", openN, "trigger=" + isTrigger);
-      try {
-        await doCheckin(opts, { fromOpen: true });
-      } catch (e) {
-        log("open-app checkin err", e);
-        notify(NAME, "签到失败", String(e));
-      }
-    } else {
+    // 第 N+1 个请求起：整轮打开只允许一个请求 claim 签到（其余静默跳过，避免 3 条通知）
+    if (!opts.自动签到) {
       log("path=capture only, checkin disabled");
+      $done({});
+      return;
+    }
+    let stClaim = readStore();
+    // keep open counters
+    stClaim.openReqCount = openN;
+    const claim = tryClaimOpenCheckin(stClaim);
+    if (!claim.ok) {
+      log("path=skip checkin (another request claimed this open session)");
+      $done({});
+      return;
+    }
+    log("path=open-app checkin on req#", openN, "trigger=" + isTrigger);
+    try {
+      await doCheckin(opts, { fromOpen: true });
+    } catch (e) {
+      log("open-app checkin err", e);
+      notify(NAME, "签到失败", String(e));
     }
     $done({});
   } else if (stype === "event") {

@@ -25,8 +25,10 @@ function parseArgs(raw) {
     自动签到: true,
     银瓜子换硬币: false,
     调试日志: false,
+    重新签到: false,
     checkin: true,
     silver2coin: false,
+    resign: false,
     debug: false,
   };
   if (raw == null || raw === "") return out;
@@ -762,7 +764,14 @@ async function doCheckin(opts, flags) {
   }
 
   const day = today(); // Asia/Shanghai YYYY-MM-DD
-  if (store.lastRunDay === day && store.lastRunOk) {
+  const forceResign = !!(opts.重新签到 || opts.resign);
+  if (forceResign) {
+    log("resign=true: force re-checkin, clear lastRunOk for day", day);
+    store.lastRunOk = false;
+    store.lastRunDay = "";
+    store.lastAttemptAt = "";
+    writeStore(store);
+  } else if (store.lastRunDay === day && store.lastRunOk) {
     log("already succeeded Beijing day, skip", day);
     if (!fromOpen) $done({});
     return { ok: true, skipped: true };
@@ -940,7 +949,7 @@ async function doCheckin(opts, flags) {
           (exp.coins || 0) +
           "（分享已完成）"
       );
-      if (exp.login || exp.watch || exp.share) okAny = true;
+      // 仅登录/观看不能算签到成功（否则失败后被 lastRunOk 卡住）
     } else if (exp && cookie && csrf) {
       // auto share
       let aid = null;
@@ -1093,16 +1102,22 @@ async function doCheckin(opts, flags) {
   // hardFail only forces failure notify if nothing ok
 
   store.lastRunDay = day;
-  store.lastRunOk = okAny;
+  store.lastRunOk = !!okAny; // 只有真正成功才 true；失败必须 false，否则不再自动签
+  if (!okAny) store.lastRunOk = false;
   store.lastResult = lines.join(" | ");
   store.lastHardFail = !!hardFail && !okAny;
   writeStore(store);
 
   // 失败立刻通知；成功通知一次
   if (!okAny) {
+    // 明确失败：绝不能 lastRunOk（已在上面按 okAny 写入）
     notify(NAME, "签到失败", lines.join("\n") || "未知错误");
   } else {
-    notify(NAME, "签到完成", lines.join("\n"));
+    let extra = "";
+    if (forceResign) {
+      extra = "\n\n重新签到已完成：请把模块参数 resign 改回 false，避免每次打开都强制重签";
+    }
+    notify(NAME, "签到完成", lines.join("\n") + extra);
   }
   log("checkin done", okAny ? "ok" : "fail", lines.join(" | "));
   if (!fromOpen) $done({});

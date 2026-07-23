@@ -1,7 +1,8 @@
 // Bilibili daily check-in for Surge (network only)
 // - type=http-request on fingerprint: capture Cookie / access_key
-// - type=cron: try at 00:00 / 10:00 / 19:00 / 21:00 (device local time)
-//   First success of the day marks lastRunOk; later slots no-op.
+// - type=cron: hourly tick; only act at Beijing 00/10/19/21
+//   Day key + slots use Asia/Shanghai (UTC+8), not device local TZ.
+//   First success of that Beijing day marks lastRunOk; later slots no-op.
 //
 // Tasks (best-effort, API may change):
 // 1) live DoSign  (GET /xlive/web-ucenter/v1/sign/DoSign)
@@ -131,10 +132,52 @@ function http(method, url, headers, body) {
   });
 }
 
+// Force Asia/Shanghai (UTC+8) for day key and hour slots.
+function beijingParts(date) {
+  const d = date || new Date();
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    const map = {};
+    fmt.formatToParts(d).forEach((x) => {
+      if (x.type !== "literal") map[x.type] = x.value;
+    });
+    // hour "24" -> 0 on some engines at midnight
+    let hour = parseInt(map.hour, 10);
+    if (hour === 24) hour = 0;
+    return {
+      day: map.year + "-" + map.month + "-" + map.day,
+      hour: hour,
+      minute: parseInt(map.minute, 10) || 0,
+    };
+  } catch (e) {
+    // Fallback: UTC + 8h wall clock
+    const utc = d.getTime() + d.getTimezoneOffset() * 60000;
+    const bj = new Date(utc + 8 * 3600000);
+    const p = (n) => (n < 10 ? "0" + n : "" + n);
+    return {
+      day: bj.getFullYear() + "-" + p(bj.getMonth() + 1) + "-" + p(bj.getDate()),
+      hour: bj.getHours(),
+      minute: bj.getMinutes(),
+    };
+  }
+}
+
 function today() {
-  const d = new Date();
-  const p = (n) => (n < 10 ? "0" + n : "" + n);
-  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+  return beijingParts().day;
+}
+
+const CHECKIN_HOURS_BJ = [0, 10, 19, 21];
+
+function isCheckinHourBeijing() {
+  return CHECKIN_HOURS_BJ.indexOf(beijingParts().hour) >= 0;
 }
 
 async function captureCookie(opts) {
@@ -196,11 +239,18 @@ async function doCheckin(opts) {
     return;
   }
 
-  const day = today(); // local YYYY-MM-DD; new day => lastRunDay mismatch => runs again
-  // Same local day + already succeeded: skip remaining 0/10/19/21 slots.
-  // Cross midnight: day string changes, so this is once-per-day, not once-forever.
+  // Beijing calendar day + hour slots (not device local TZ).
+  if (!isCheckinHourBeijing()) {
+    log("skip: not Beijing check-in hour", beijingParts());
+    $done({});
+    return;
+  }
+
+  const day = today(); // Asia/Shanghai YYYY-MM-DD
+  // Same Beijing day + already succeeded: skip remaining 0/10/19/21 slots.
+  // Next Beijing midnight: day string changes => runs again (once per BJ day, not forever).
   if (store.lastRunDay === day && store.lastRunOk) {
-    log("already succeeded today, skip slot");
+    log("already succeeded Beijing day, skip slot", day);
     $done({});
     return;
   }

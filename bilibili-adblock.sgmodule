@@ -26,7 +26,9 @@ bili-gaia-block = type=http-request,pattern=^https?:\/\/api\.bilibili\.com\/x\/i
 
 bili-checkin-capture = type=http-request,pattern=^https?:\/\/app\.bilibili\.com\/x\/resource\/fingerprint\?,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/checkin.js,requires-body=0,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&debug={{{debug}}},script-update-interval=0
 # 自动签到：本地时间 0/10/19/21 点各试一次；当日成功后跳过后续时段
-bili-checkin-cron = type=cron,cronexp=0 0,10,19,21 * * *,wake-system=1,timeout=30,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/checkin.js,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&debug={{{debug}}},script-update-interval=0
+# 每小时整点触发；脚本内仅在北京时间 0/10/19/21 执行（与设备时区无关）
+# 当日北京时间成功后跳过后续时段
+bili-checkin-cron = type=cron,cronexp=0 * * * *,wake-system=1,timeout=30,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/checkin.js,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&debug={{{debug}}},script-update-interval=0
 
 [MITM]
 hostname = %APPEND% app.bilibili.com, api.bilibili.com, api.biliapi.net, app.biliapi.net, grpc.biliapi.net, api.live.bilibili.com, api.vc.bilibili.com, manga.bilibili.com, cm.bilibili.com, miniapp.bilibili.com, line1-h5-mobile-api.biligame.com, line3-h5-mobile-api.biligame.com, game-attribute.biligame.com, app.biligame.com

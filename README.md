@@ -51,9 +51,10 @@ https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bi
 ### 自动签到
 
 1. 启用模块并打开 App 首页一次（抓取 Cookie）
-2. 每天在设备本地时间 **0:00 / 10:00 / 19:00 / 21:00** 各尝试一次
-   - **当日任一时段成功** → 标记成功，后续时段跳过
+2. 按 **北京时间（Asia/Shanghai）** 在 **0:00 / 10:00 / 19:00 / 21:00** 各尝试一次（与手机系统时区无关）
+   - **当日（北京时间）任一时段成功** → 标记成功，后续时段跳过
    - 失败则下一时段继续尝试
+   - 次日北京时间 0 点起重新开始（按日期，不是终身只签一次）
 3. 不需要时将 `checkin` 设为 `false`
 
 Cookie 仅保存在本机 `$persistentStore`，不会外传。
@@ -67,7 +68,7 @@ GET https://api.live.bilibili.com/xlive/web-ucenter/v1/sign/DoSign
 ```
 
 App 内对应能力一般在：**直播 Tab / 直播中心 → 签到**。  
-模块侧入口是脚本 `js/checkin.js` + 模块里的 cron（`0 0,10,19,21 * * *`）。
+模块侧：脚本 `js/checkin.js`；cron 每小时整点触发，脚本内用北京时间过滤到 0/10/19/21。
 
 ## 仓库结构
 

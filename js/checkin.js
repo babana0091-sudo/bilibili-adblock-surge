@@ -15,10 +15,10 @@ const NAME = "哔哩签到";
 
 function parseArgs(raw) {
   const out = {
-    自动签到: false,
+    自动签到: true,
     银瓜子换硬币: false,
     调试日志: false,
-    checkin: false,
+    checkin: true,
     silver2coin: false,
     debug: false,
   };

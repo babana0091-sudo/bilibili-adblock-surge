@@ -5,7 +5,7 @@
 #!category=去广告
 #!version=2.0.7
 #!arguments=ad_normal:true,ad_pause:true,ad_game:true,ad_drama:true,checkin:true,silver2coin:false,block_risk:false,reset:false,debug:false
-#!arguments-desc=ad_normal(常规广告): 开屏/推荐/信息流等\n默认 true\n\nad_pause(暂停广告): 暂停页商业卡\n默认 true\n\nad_game(小游戏广告)\n默认 true\n\nad_drama(短剧广告)\n默认 true\n\ncheckin(自动签到): 打开App后台签到\n默认 true\n\nsilver2coin(银瓜子换硬币)\n默认 false\n\nblock_risk(拦截Gaia风控上报)\n默认 false\n\nreset(重新签到): 设true后打开B站强制再签一次(只生效一次,请再改回false)\n默认 false\n\ndebug(调试日志)\n默认 false
+#!arguments-desc=ad_normal(常规广告): 开屏/推荐/信息流等\n默认 true\n\nad_pause(暂停广告)\n默认 true\n\nad_game(小游戏广告)\n默认 true\n\nad_drama(短剧广告)\n默认 true\n\ncheckin(自动签到)\n默认 true\n\nsilver2coin(银瓜子换硬币)\n默认 false\n\nblock_risk(拦截Gaia)\n默认 false\n\nreset(重新签到): 设true强制再签一次(一次性,请再改回false)\n默认 false\n\ndebug(调试日志)\n默认 false
 [Rule]
 URL-REGEX,"^http:\/\/upos-sz-static\.bilivideo\.com\/ssaxcode\/\w{2}\/\w{2}\/\w{32}-1-SPLASH",REJECT-TINYGIF
 URL-REGEX,"^http:\/\/[\d\.]+:8000\/v1\/resource\/\w{32}-1-SPLASH",REJECT-TINYGIF

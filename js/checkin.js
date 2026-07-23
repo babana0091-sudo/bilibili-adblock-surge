@@ -117,16 +117,62 @@ function cookieMap(cookie) {
 }
 
 async function detectVipStatus(baseHeaders, accessKey) {
-  // Prefer nav (vipStatus/vipType); fallback vip/web/user/info
+  // App 侧主鉴权是 access_key（URL query）；Web 才是 Cookie SESSDATA。
+  // 官方多数接口：Cookie(SESSDATA) / access_key 二选一即可。
   // Returns { isVip: boolean, detail: string }
   accessKey = accessKey || "";
-  const navUrl =
-    "https://api.bilibili.com/x/web-interface/nav" +
-    (accessKey && !(baseHeaders && baseHeaders.Cookie)
-      ? "?access_key=" + encodeURIComponent(accessKey)
-      : "");
+  function withKey(url) {
+    if (!accessKey) return url;
+    return url + (url.indexOf("?") >= 0 ? "&" : "?") + "access_key=" + encodeURIComponent(accessKey);
+  }
+  // 1) App/oauth style: passport oauth2 info often works with access_key
   try {
-    const r = await http("GET", navUrl, baseHeaders);
+    const r = await http(
+      "GET",
+      withKey("https://passport.bilibili.com/x/passport-login/oauth2/info"),
+      baseHeaders
+    );
+    const j = JSON.parse(r.data || "{}");
+    if (j.code === 0 && j.data) {
+      const d = j.data;
+      // mid present => logged in; vip fields vary by version
+      const status = d.vip_status != null ? d.vip_status : d.vipStatus;
+      const type = d.vip_type != null ? d.vip_type : d.vipType;
+      const mid = d.mid || d.userid || "";
+      let isVip = status === 1 || status === true || (type > 0 && status !== 0);
+      // some payloads nest vip
+      if (d.vip && (d.vip.status === 1 || d.vip.type > 0)) isVip = true;
+      const detail =
+        "oauth2/info mid=" +
+        mid +
+        " vipStatus=" +
+        status +
+        " vipType=" +
+        type +
+        " via=" +
+        (accessKey ? "access_key" : "cookie");
+      // If login ok but vip fields missing, fall through to nav for vip only
+      if (mid || d.isLogin) {
+        if (status != null || type != null || (d.vip && d.vip.status != null)) {
+          return { isVip: !!isVip, detail: detail };
+        }
+        log("oauth2 login ok, vip fields missing, try nav", detail);
+      } else {
+        log("oauth2 info code/data", j.code, JSON.stringify(d).slice(0, 120));
+      }
+    } else {
+      log("oauth2 info code", j.code, j.message || j.msg || "");
+    }
+  } catch (e) {
+    log("oauth2 info err", e);
+  }
+  // 2) nav (works with Cookie; often also access_key)
+  try {
+    const r = await http(
+      "GET",
+      withKey("https://api.bilibili.com/x/web-interface/nav"),
+      baseHeaders
+    );
     const j = JSON.parse(r.data || "{}");
     if (j.code === 0 && j.data) {
       const d = j.data;
@@ -134,7 +180,6 @@ async function detectVipStatus(baseHeaders, accessKey) {
       const status = vip.status != null ? vip.status : d.vipStatus;
       const type = vip.type != null ? vip.type : d.vipType;
       const due = vip.due_date || vip.dueDate || d.vipDueDate || 0;
-      // status===1 大会员有效；type 1/2 月度/年度等
       const isVip = status === 1 || status === true || (type > 0 && status !== 0);
       const detail =
         "nav vipStatus=" +
@@ -144,17 +189,39 @@ async function detectVipStatus(baseHeaders, accessKey) {
         " due=" +
         due +
         " isLogin=" +
-        !!d.isLogin;
+        !!d.isLogin +
+        " via=" +
+        (accessKey ? "access_key" : "cookie");
       return { isVip: !!isVip, detail: detail };
     }
     log("nav vip code", j.code, j.message || j.msg || "");
   } catch (e) {
     log("nav vip err", e);
   }
+  // 3) vip privilege my (docs: Cookie / access_key)
   try {
     const r = await http(
       "GET",
-      "https://api.bilibili.com/x/vip/web/user/info",
+      withKey("https://api.bilibili.com/x/vip/privilege/my"),
+      baseHeaders
+    );
+    const j = JSON.parse(r.data || "{}");
+    // code 0 with data usually means VIP-capable account; non-vip may still 0 with empty list
+    if (j.code === 0) {
+      return {
+        isVip: true,
+        detail: "vip/privilege/my code=0 (likely VIP or privilege API ok) via=" + (accessKey ? "access_key" : "cookie"),
+      };
+    }
+    // common non-vip / no auth codes — treat as not vip rather than crash
+    log("vip privilege code", j.code, j.message || j.msg || "");
+  } catch (e) {
+    log("vip privilege err", e);
+  }
+  try {
+    const r = await http(
+      "GET",
+      withKey("https://api.bilibili.com/x/vip/web/user/info"),
       baseHeaders
     );
     const j = JSON.parse(r.data || "{}");
@@ -172,18 +239,19 @@ async function detectVipStatus(baseHeaders, accessKey) {
   } catch (e) {
     log("vip info err", e);
   }
-  return { isVip: false, detail: "detect failed / not vip" };
+  return { isVip: false, detail: "detect failed / not vip (need access_key or Cookie)" };
 }
 
 function buildAuthHeaders(store) {
   const cookie = (store && store.cookie) || "";
-  return {
-    Cookie: cookie,
+  const h = {
     "User-Agent":
       "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BiliApp",
     Referer: "https://www.bilibili.com/",
     Origin: "https://www.bilibili.com",
   };
+  if (cookie && cookie.includes("SESSDATA")) h.Cookie = cookie;
+  return h;
 }
 
 /**
@@ -199,8 +267,10 @@ async function probeVipIfSession(opts, reason, force) {
     return null;
   }
   const store = readStore();
-  if (!store.cookie || !String(store.cookie).includes("SESSDATA")) {
-    log("vip probe skip: no session cookie", reason || "");
+  const hasCookie = !!(store.cookie && String(store.cookie).includes("SESSDATA"));
+  const hasAK = !!(store.access_key && String(store.access_key).length > 8);
+  if (!hasCookie && !hasAK) {
+    log("vip probe skip: no session (no Cookie SESSDATA and no access_key)", reason || "");
     return null;
   }
   const now = Date.now();
@@ -410,22 +480,31 @@ async function captureCookie(opts) {
     "url=" + url.slice(0, 80)
   );
 
-  // Notify only when we first get a usable session token (cookie OR access_key).
-  // VIP probe is NOT done here (async elsewhere) so we don't block app traffic.
-  if (changed && (gotCookie || gotAccessKey)) {
-    const kind = gotCookie ? "Cookie" : "access_key";
-    const uid = store.uid ? "UID " + store.uid : "";
-    const vipHint =
+  // Notify when session token newly stored or upgraded.
+  // App 主路径几乎只有 access_key，没有 Cookie——这算抓到登录态。
+  // VIP 不在这里查（避免拖死首页请求）。
+  const firstSession =
+    !store.sessionNotifiedAt && (gotCookie || gotAccessKey || store.access_key || store.cookie);
+  if ((changed && (gotCookie || gotAccessKey)) || (firstSession && (store.access_key || gotCookie))) {
+    store.sessionNotifiedAt = new Date().toISOString();
+    writeStore(store);
+    const parts = [];
+    if (gotCookie || (store.cookie && String(store.cookie).includes("SESSDATA")))
+      parts.push("Cookie: 有");
+    else parts.push("Cookie: 无(App常无Cookie头)");
+    if (store.access_key) parts.push("access_key: 有");
+    else parts.push("access_key: 无");
+    if (store.uid) parts.push("UID " + store.uid);
+    parts.push(
       store.isVip === true
-        ? "会员状态: 大会员(缓存)"
+        ? "会员: 大会员(缓存)"
         : store.isVip === false
-          ? "会员状态: 非大会员(缓存)"
-          : "会员状态: 待检测(定时任务)";
-    notify(
-      NAME,
-      kind + " / Session 已更新",
-      [uid, vipHint, "签到将用 access_key 或 Cookie"].filter(Boolean).join("\n")
+          ? "会员: 非大会员(缓存)"
+          : "会员: 待cron检测"
     );
+    parts.push("登录态已保存，可用于签到");
+    notify(NAME, "登录态已捕获", parts.join("\n"));
+    log("session notify", parts.join(" | "));
   }
 
   // Always release the request immediately

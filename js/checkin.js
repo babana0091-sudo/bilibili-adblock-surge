@@ -6,7 +6,7 @@
 // Storage: bili_adblock_checkin_v2
 
 const STORE_KEY = "bili_adblock_checkin_v2"; // v2: 换键丢弃旧 lastRunOk，避免误标成功导致不再签
-const SCRIPT_VERSION = "2.0.10";
+const SCRIPT_VERSION = "2.0.11";
 const NAME = "哔哩签到";
 
 function parseArgs(raw) {
@@ -782,10 +782,71 @@ function computeNextRetryMs(failCount, nowMs) {
   return nowMs + wait;
 }
 
+
+/** In-process open-app session: first N capture requests only capture, no checkin. */
+const OPEN_SKIP_CHECKIN_FIRST_N = 10;
+const CHECKIN_LOCK_TTL_MS = 3 * 60 * 1000; // stale lock auto-expire
+
+function touchOpenSession(store) {
+  const now = Date.now();
+  // 新一轮打开：距上次 capture > 90s 则重置计数
+  const last = store.openSessionAt ? Date.parse(store.openSessionAt) : 0;
+  if (!last || now - last > 90 * 1000) {
+    store.openSessionAt = new Date().toISOString();
+    store.openReqCount = 0;
+  }
+  store.openReqCount = (store.openReqCount || 0) + 1;
+  store.openSessionAt = new Date().toISOString();
+  return store.openReqCount;
+}
+
+function tryAcquireCheckinLock(store, reason) {
+  const now = Date.now();
+  const until = store.checkinLockUntil || 0;
+  if (until && now < until) {
+    log(
+      "checkin lock busy",
+      "reason=" + reason,
+      "until=" + new Date(until).toISOString(),
+      "holder=" + (store.checkinLockBy || "?")
+    );
+    return false;
+  }
+  store.checkinLockUntil = now + CHECKIN_LOCK_TTL_MS;
+  store.checkinLockBy = reason || "checkin";
+  store.checkinLockAt = new Date().toISOString();
+  writeStore(store);
+  log("checkin lock acquired", store.checkinLockBy, "ttlMs=" + CHECKIN_LOCK_TTL_MS);
+  return true;
+}
+
+function releaseCheckinLock(store, reason) {
+  try {
+    // re-read to avoid clobbering concurrent writes as much as possible
+    const s = readStore();
+    s.checkinLockUntil = 0;
+    s.checkinLockBy = "";
+    s.checkinLockAt = "";
+    // merge dayState etc from store if fresher? keep s then overlay critical from store
+    if (store && store.dayState) s.dayState = store.dayState;
+    if (store && store.cookie) {
+      s.cookie = store.cookie;
+      s.csrf = store.csrf;
+      s.uid = store.uid;
+      s.bili_app_token = store.bili_app_token;
+    }
+    writeStore(s);
+    log("checkin lock released", reason || "");
+  } catch (e) {
+    log("checkin lock release err", e);
+  }
+}
+
 async function doCheckin(opts, flags) {
   flags = flags || {};
   const fromOpen = !!flags.fromOpen;
-  const store = readStore();
+  let store = readStore();
+  let lockHeld = false;
   const hasCookie = !!(store.cookie && String(store.cookie).includes("SESSDATA"));
   const hasAK = !!(store.bili_app_token && String(store.bili_app_token).length > 8);
   if (!opts.自动签到) {
@@ -793,6 +854,15 @@ async function doCheckin(opts, flags) {
     if (!fromOpen) $done({});
     return { ok: false, skipped: true };
   }
+  // 互斥：同一时刻只允许一个签到任务（persistentStore 锁 + TTL）
+  if (!tryAcquireCheckinLock(store, fromOpen ? "open-app" : "manual")) {
+    if (!fromOpen) $done({});
+    return { ok: false, skipped: true, locked: true };
+  }
+  lockHeld = true;
+  // refresh store after lock write
+  store = readStore();
+  try {
   if (!hasCookie && !hasAK) {
     const msg =
       "未捕获登录态：请打开 B 站浏览（直播/动态等）以抓取 Cookie(SESSDATA)。仅 access_key 无法 Web 签到";
@@ -1214,6 +1284,16 @@ async function doCheckin(opts, flags) {
 
   if (!fromOpen) $done({});
   return { ok: !!st.ok, lines: lines, pending: st.pending };
+  } catch (e) {
+    log("doCheckin fatal", e);
+    try {
+      notify(NAME, "签到失败", String(e));
+    } catch (e2) {}
+    if (!fromOpen) $done({});
+    return { ok: false, error: String(e) };
+  } finally {
+    if (lockHeld) releaseCheckinLock(store, fromOpen ? "open-app" : "manual");
+  }
 }
 
 (async () => {
@@ -1244,20 +1324,37 @@ async function doCheckin(opts, flags) {
   );
 
   // 无 cron：打开 B 站 trigger
-  // 重要：Surge 在 http-request 里 $done() 之后会结束脚本，setTimeout 不可靠 → 签到必须在 $done 之前 await
-  // 仅在 isCheckinTriggerUrl（fingerprint/tab/mine/splash/nav）上签到，避免拖慢 feed
+  // 1) 前 OPEN_SKIP_CHECKIN_FIRST_N 个请求只抓登录态、不签到（减少启动卡顿/并发）
+  // 2) 签到互斥锁：同时只跑一个 doCheckin
+  // 3) 签到仍在 $done 前 await（Surge 可靠），但仅在「过了前 N 个 + 触发 URL」时执行
   if (typeof $request !== "undefined" && $request && $request.url) {
     const reqUrl = String($request.url);
     log("path=open-app capture", reqUrl.slice(0, 120));
+    let openN = 0;
+    try {
+      const st0 = readStore();
+      openN = touchOpenSession(st0);
+      writeStore(st0);
+      log("open session req#", openN, "skipCheckinIf<=", OPEN_SKIP_CHECKIN_FIRST_N);
+    } catch (e) {
+      log("open session err", e);
+    }
     try {
       await captureCookie(opts);
     } catch (e) {
       log("capture err", e);
     }
-    const should =
-      opts.自动签到 && typeof isCheckinTriggerUrl === "function" && isCheckinTriggerUrl(reqUrl);
+    const isTrigger =
+      typeof isCheckinTriggerUrl === "function" && isCheckinTriggerUrl(reqUrl);
+    // 前 N 个请求：不签到，立刻放行
+    if (openN > 0 && openN <= OPEN_SKIP_CHECKIN_FIRST_N) {
+      log("fast-path: first", openN, "requests skip checkin");
+      $done({});
+      return;
+    }
+    const should = opts.自动签到 && isTrigger;
     if (should) {
-      log("path=open-app checkin BEFORE $done (reliable)");
+      log("path=open-app checkin BEFORE $done (after first N)");
       try {
         await doCheckin(opts, { fromOpen: true });
       } catch (e) {
@@ -1265,7 +1362,11 @@ async function doCheckin(opts, flags) {
         notify(NAME, "签到失败", String(e));
       }
     } else {
-      log("path=capture only (not trigger url), skip checkin this request");
+      log(
+        "path=capture only",
+        "trigger=" + isTrigger,
+        "checkin=" + !!opts.自动签到
+      );
     }
     $done({});
   } else if (stype === "event") {

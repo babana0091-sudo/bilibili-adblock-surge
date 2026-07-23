@@ -1,23 +1,12 @@
 // Bilibili daily check-in for Surge (network only)
-// - type=http-request: capture Cookie / bili_app_token (URL access_key)
-// - type=cron: hourly tick; only act at Beijing 00/10/19/21
-//   Day key + slots use Asia/Shanghai (UTC+8), not device local TZ.
-//   First success of that Beijing day marks lastRunOk; later slots no-op.
-//
-// Tasks (VIP only; non-VIP skipped with log only, no notification):
-// 0) VIP on capture notify + cron; session = Cookie or bili_app_token
-//    + again before sign tasks via x/web-interface/nav (fallback x/vip/web/user/info)
-// 1) live DoSign
-// 2) 大积分签到 POST /pgc/activity/score/task/sign
-// 3) exp/reward status
-// 4) vip privilege receive (optional)
-// 5) silver2coin (optional)
-// Random delay before tasks to avoid整点风控
-//
-// Storage key: bili_adblock_checkin
+// - open App → capture session → background checkin (non-blocking)
+// - Beijing day success key: dayOk (store key v2, old lastRunOk discarded)
+// - Failures: record pending items; backoff 30m → 1h → 2h … never cross BJ midnight
+// - Tasks: 大积分 / 经验分享 / 福利 / 可选银瓜子；直播签到已下线
+// Storage: bili_adblock_checkin_v2
 
-const STORE_KEY = "bili_adblock_checkin";
-const SCRIPT_VERSION = "2.0.6";
+const STORE_KEY = "bili_adblock_checkin_v2"; // v2: 换键丢弃旧 lastRunOk，避免误标成功导致不再签
+const SCRIPT_VERSION = "2.0.10";
 const NAME = "哔哩签到";
 
 function parseArgs(raw) {
@@ -78,11 +67,37 @@ function notify(title, sub, body) {
 function readStore() {
   try {
     const raw = $persistentStore.read(STORE_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw);
-  } catch (e) {
-    return {};
-  }
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  // 首次用 v2 键：从旧键迁移 Cookie/token，不迁移 lastRunOk/day 成功态（相当于可重新签）
+  try {
+    const oldRaw = $persistentStore.read("bili_adblock_checkin");
+    if (oldRaw) {
+      const old = JSON.parse(oldRaw);
+      const mig = {};
+      for (const k of [
+        "cookie",
+        "csrf",
+        "uid",
+        "bili_app_token",
+        "app_query_snap",
+        "isVip",
+        "vipDetail",
+        "vipCheckedAt",
+        "cookieCaptureFrom",
+        "cookieCaptureUrl",
+        "authorization",
+      ]) {
+        if (old[k] != null) mig[k] = old[k];
+      }
+      try {
+        $persistentStore.write(JSON.stringify(mig), STORE_KEY);
+      } catch (e) {}
+      log("migrated session from old store key (day success NOT migrated)");
+      return mig;
+    }
+  } catch (e) {}
+  return {};
 }
 
 function writeStore(obj) {
@@ -114,6 +129,34 @@ function cookieMap(cookie) {
       if (k) o[k] = v;
     });
   return o;
+}
+
+
+/** SESSDATA in Cookie must be URL-encoded for some web APIs (`,` → %2C). */
+function cookieForWebApi(cookie) {
+  if (!cookie) return "";
+  return String(cookie).replace(/SESSDATA=([^;]+)/, function (_, v) {
+    try {
+      // if already encoded, decode once then re-encode
+      const raw = decodeURIComponent(v);
+      return "SESSDATA=" + encodeURIComponent(raw);
+    } catch (e) {
+      return "SESSDATA=" + encodeURIComponent(v);
+    }
+  });
+}
+
+function webHeaders(store, referer) {
+  const cookie = cookieForWebApi((store && store.cookie) || "");
+  const h = {
+    "User-Agent":
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BiliApp/80000100 os/ios model/iPhone mobi_app/iphone build/80000100",
+    Referer: referer || "https://www.bilibili.com/",
+    Origin: "https://www.bilibili.com",
+    Accept: "application/json, text/plain, */*",
+  };
+  if (cookie) h.Cookie = cookie;
+  return h;
 }
 
 async function detectVipStatus(baseHeaders, accessKey) {
@@ -381,24 +424,62 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Random delay 45s–8min to avoid on-the-hour bursts. */
+/** Short jitter when opening App (avoid burst; keep request path snappy). */
 function randomCheckinDelayMs() {
-  const min = 45 * 1000;
-  const max = 8 * 60 * 1000;
+  const min = 500;
+  const max = 3000;
   return min + Math.floor(Math.random() * (max - min + 1));
 }
 
-const CHECKIN_HOURS_BJ = [0, 10, 19, 21];
+// Beijing check-in windows:
+// - 0:00–0:59, 10:00–10:59, 19:00–19:59, 21:00–21:59
+// - 22:40–22:59（晚间最后一档）
+const CHECKIN_SLOTS_BJ = [
+  { hour: 0, minuteMin: 0, minuteMax: 59 },
+  { hour: 10, minuteMin: 0, minuteMax: 59 },
+  { hour: 19, minuteMin: 0, minuteMax: 59 },
+  { hour: 21, minuteMin: 0, minuteMax: 59 },
+  { hour: 22, minuteMin: 40, minuteMax: 59 },
+];
 
 function isCheckinHourBeijing() {
-  return CHECKIN_HOURS_BJ.indexOf(beijingParts().hour) >= 0;
+  const p = beijingParts();
+  for (const s of CHECKIN_SLOTS_BJ) {
+    if (p.hour !== s.hour) continue;
+    const mi = p.minute != null ? p.minute : 0;
+    if (mi >= s.minuteMin && mi <= s.minuteMax) return true;
+  }
+  return false;
+}
+
+
+/** Short label of the request that carried Cookie (for notify / later MITM narrowing). */
+function shortRequestLabel(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    let path = u.pathname || "/";
+    if (path.length > 60) path = path.slice(0, 57) + "...";
+    return u.hostname + path;
+  } catch (e) {
+    const s = String(rawUrl || "");
+    return s.length > 80 ? s.slice(0, 77) + "..." : s || "?";
+  }
+}
+
+
+/** Only run sign-in on bootstrap-ish App requests (not feed scroll). */
+function isCheckinTriggerUrl(rawUrl) {
+  const u = String(rawUrl || "");
+  return /app\.bilibili\.com\/x\/(?:resource\/(?:fingerprint|show\/(?:tab|skin))|v2\/(?:account\/(?:myinfo|mine)|splash\/)|v2\/splash)/i.test(
+    u
+  ) || /api\.bilibili\.com\/x\/web-interface\/nav/i.test(u) || /passport\.bilibili\.com\/x\/passport-login/i.test(u);
 }
 
 async function captureCookie(opts) {
   opts = opts || parseArgs(typeof $argument !== "undefined" ? $argument : "");
   if (!opts.自动签到) {
     log("capture skip: checkin=false");
-    $done({});
+    /* done by entry */
     return;
   }
   const url = ($request && $request.url) || "";
@@ -407,22 +488,44 @@ async function captureCookie(opts) {
   const auth = getHeader(headers, "Authorization") || "";
   const store = readStore();
   let sessionChanged = false;
+  let tokenChanged = false;
+  let cookieChanged = false;
   let gotCookie = false;
   let gotToken = false;
   let tokenFromReq = "";
 
-  if (cookie && cookie.includes("SESSDATA")) {
-    gotCookie = true;
-    if (store.cookie !== cookie) {
+  // Web/App mixed: some hosts send full Cookie (SESSDATA); app.bilibili.com often does not
+  if (cookie && (cookie.includes("SESSDATA") || cookie.includes("DedeUserID"))) {
+    gotCookie = !!(cookie.includes("SESSDATA"));
+    if (cookie.includes("SESSDATA") && store.cookie !== cookie) {
       store.cookie = cookie;
       store.cookieUpdatedAt = new Date().toISOString();
+      store.cookieCaptureFrom = shortRequestLabel(url);
+      store.cookieCaptureUrl = String(url).slice(0, 300);
       sessionChanged = true;
+      cookieChanged = true;
+    } else if (cookie.includes("SESSDATA") && !store.cookie) {
+      store.cookie = cookie;
+      store.cookieUpdatedAt = new Date().toISOString();
+      store.cookieCaptureFrom = shortRequestLabel(url);
+      store.cookieCaptureUrl = String(url).slice(0, 300);
+      sessionChanged = true;
+      cookieChanged = true;
     }
     const m = cookieMap(cookie);
     if (m.bili_jct) store.csrf = m.bili_jct;
-    if (m.DedeUserID && store.uid !== m.DedeUserID) {
-      store.uid = m.DedeUserID;
+    if (m.DedeUserID && store.uid !== String(m.DedeUserID)) {
+      store.uid = String(m.DedeUserID);
+      if (gotCookie) sessionChanged = true;
+    }
+    // Merge SESSDATA-bearing cookie pieces if store empty
+    if (!store.cookie && m.SESSDATA) {
+      store.cookie = cookie;
+      store.cookieCaptureFrom = shortRequestLabel(url);
+      store.cookieCaptureUrl = String(url).slice(0, 300);
       sessionChanged = true;
+      cookieChanged = true;
+      gotCookie = true;
     }
   }
 
@@ -441,6 +544,31 @@ async function captureCookie(opts) {
     }
   } catch (e) {}
 
+  // Snapshot App signed-query companions (for diagnostics / future app-signed APIs)
+  try {
+    const u = new URL(url);
+    if (u.searchParams.get("access_key") || u.searchParams.get("appkey")) {
+      const snap = {};
+      for (const k of [
+        "appkey",
+        "mobi_app",
+        "platform",
+        "build",
+        "device",
+        "ts",
+        "actionKey",
+        "statistics",
+      ]) {
+        const v = u.searchParams.get(k);
+        if (v) snap[k] = v;
+      }
+      if (Object.keys(snap).length) {
+        store.app_query_snap = snap;
+        store.appQuerySnapAt = new Date().toISOString();
+      }
+    }
+  } catch (e) {}
+
   try {
     const body = ($request && $request.body) || "";
     if (typeof body === "string" && body.includes("access_key=")) {
@@ -454,6 +582,7 @@ async function captureCookie(opts) {
             store.bili_app_token = ak;
             store.biliAppTokenUpdatedAt = new Date().toISOString();
             sessionChanged = true;
+            tokenChanged = true;
           }
         }
       }
@@ -480,12 +609,13 @@ async function captureCookie(opts) {
     "url=" + String(url).slice(0, 90)
   );
 
-  // Notify policy (device local timezone day):
-  // - At most once per local calendar day
-  // - After a notify today, no more that day even if token rotates
-  // - Next local day: notify again only if token/cookie changed (sessionChanged)
-  if (!sessionChanged) {
-    $done({});
+  // Notify policy (device/phone local calendar day):
+  // - token 更新通知：本地自然日最多 1 次
+  // - cookie 更新通知：本地自然日最多 1 次
+  // - 同一天最多 2 次（token 一次 + cookie 一次）
+  // - 次日：对应类型在凭证再次变化时才可再通知
+  if (!sessionChanged || (!tokenChanged && !cookieChanged)) {
+    /* done by entry */
     return;
   }
 
@@ -494,18 +624,35 @@ async function captureCookie(opts) {
     (store.bili_app_token && String(store.bili_app_token).length > 8)
   );
   if (!hasSession) {
-    $done({});
+    /* done by entry */
     return;
   }
 
   const localDay = deviceLocalDay();
-  if (store.sessionNotifyLocalDay === localDay) {
-    log("capture notify skip: already notified local day", localDay);
-    $done({});
+  const tokenNotifiedToday = store.tokenNotifyLocalDay === localDay;
+  const cookieNotifiedToday = store.cookieNotifyLocalDay === localDay;
+  let notifyKind = "";
+  if (tokenChanged && cookieChanged && !tokenNotifiedToday && !cookieNotifiedToday) {
+    notifyKind = "token"; // one combined popup; both daily caps set below
+  } else if (tokenChanged && !tokenNotifiedToday) {
+    notifyKind = "token";
+  } else if (cookieChanged && !cookieNotifiedToday) {
+    notifyKind = "cookie";
+  }
+  if (!notifyKind) {
+    log(
+      "capture notify skip: daily cap",
+      "localDay=" + localDay,
+      "tokenChanged=" + tokenChanged,
+      "cookieChanged=" + cookieChanged,
+      "tokenNotifiedToday=" + tokenNotifiedToday,
+      "cookieNotifiedToday=" + cookieNotifiedToday
+    );
+    /* done by entry */
     return;
   }
 
-  // VIP only when we will notify (new local day + credentials changed)
+  // VIP only when we will notify
   let vipLine = "会员: 查询失败";
   try {
     const hdrs = buildAuthHeaders(store);
@@ -554,7 +701,17 @@ async function captureCookie(opts) {
   }
 
   store.sessionNotifyAt = new Date().toISOString();
-  store.sessionNotifyLocalDay = deviceLocalDay(); // phone local calendar day
+  if (notifyKind === "token") {
+    store.tokenNotifyLocalDay = localDay;
+    // both changed together → one popup is enough for both types today
+    if (cookieChanged) store.cookieNotifyLocalDay = localDay;
+  }
+  if (notifyKind === "cookie") {
+    store.cookieNotifyLocalDay = localDay;
+    if (tokenChanged && store.tokenNotifyLocalDay !== localDay) {
+      // cookie-only path; leave token slot free if token also changed but token was already notified
+    }
+  }
   writeStore(store);
 
   // Order: 会员 → access_token → UID → Cookie last
@@ -562,97 +719,148 @@ async function captureCookie(opts) {
   parts.push(vipLine);
   parts.push(store.bili_app_token ? "access_token: 有" : "access_token: 无");
   if (store.uid) parts.push("UID " + store.uid);
+  if (store.cookie && String(store.cookie).includes("SESSDATA")) {
+    const src = store.cookieCaptureFrom || shortRequestLabel(url) || "?";
+    parts.push("Cookie: 有 (" + src + ")");
+  } else {
+    parts.push("Cookie: 无");
+  }
   parts.push(
-    gotCookie || (store.cookie && String(store.cookie).includes("SESSDATA"))
-      ? "Cookie: 有"
-      : "Cookie: 无"
+    notifyKind === "token"
+      ? "原因: access_token 更新"
+      : "原因: Cookie 更新"
   );
+  if (notifyKind === "cookie" && (store.cookieCaptureFrom || url)) {
+    log(
+      "cookie capture source (record for later narrow MITM)",
+      store.cookieCaptureFrom || shortRequestLabel(url),
+      store.cookieCaptureUrl || String(url).slice(0, 200)
+    );
+  }
   parts.push("登录态已保存");
-  notify(NAME, "登录态已捕获", parts.join("\n"));
-  log("session notify (local day + credentials changed)", localDay, parts.join(" | "));
-  $done({});
+  const title =
+    notifyKind === "token" ? "登录态已捕获 (Token)" : "登录态已捕获 (Cookie)";
+  notify(NAME, title, parts.join("\n"));
+  log(
+    "session notify",
+    "kind=" + notifyKind,
+    "localDay=" + localDay,
+    parts.join(" | ")
+  );
+  /* done by entry */
 }
 
-async function doCheckin(opts) {
+
+/** Beijing day state for success + failure retry (never span midnight). */
+function dayState(store, day) {
+  if (!store.dayState || store.dayState.day !== day) {
+    store.dayState = {
+      day: day,
+      ok: false, // 当天是否已成功（新键，不是旧 lastRunOk）
+      pending: [], // 失败待重试项 e.g. ["bigpoint","share"]
+      failCount: 0,
+      lastAttemptAt: "",
+      nextRetryAt: 0, // epoch ms
+      lastResult: "",
+    };
+  }
+  return store.dayState;
+}
+
+/** Backoff after fail: 30m, 1h, 2h, 4h… but never past Beijing next midnight. */
+function computeNextRetryMs(failCount, nowMs) {
+  // failCount 1 → 30m, 2 → 1h, 3 → 2h, 4 → 4h …
+  const mins = failCount <= 1 ? 30 : 30 * Math.pow(2, failCount - 1);
+  let wait = mins * 60 * 1000;
+  // Cap so next retry is still same Beijing calendar day (before next 00:00 CST)
+  const p = beijingParts(new Date(nowMs));
+  // minutes until BJ midnight
+  const minsLeft = (23 - p.hour) * 60 + (59 - (p.minute || 0));
+  const maxWait = Math.max(0, minsLeft * 60 * 1000 - 60 * 1000); // leave 1min margin
+  if (maxWait <= 0) return nowMs + 60 * 1000; // almost midnight: try once more soon or day flips
+  if (wait > maxWait) wait = maxWait;
+  return nowMs + wait;
+}
+
+async function doCheckin(opts, flags) {
+  flags = flags || {};
+  const fromOpen = !!flags.fromOpen;
   const store = readStore();
   const hasCookie = !!(store.cookie && String(store.cookie).includes("SESSDATA"));
   const hasAK = !!(store.bili_app_token && String(store.bili_app_token).length > 8);
-  if (!hasCookie && !hasAK) {
-    // Throttle "no session" notifications: at most once per 6 hours
-    const lastN = store.lastNoSessionNotifyAt
-      ? Date.parse(store.lastNoSessionNotifyAt)
-      : 0;
-    if (!lastN || Date.now() - lastN > 6 * 3600 * 1000) {
-      store.lastNoSessionNotifyAt = new Date().toISOString();
-      writeStore(store);
-      notify(
-        NAME,
-        "未捕获登录态",
-        "App 请求常无 Cookie，请打开 B 站首页一次以抓取 access_key；或登录态失效请重新登录"
-      );
-    } else {
-      log("no session, notify throttled");
-    }
-    $done({});
-    return;
-  }
   if (!opts.自动签到) {
     log("auto checkin disabled");
-    $done({});
-    return;
+    if (!fromOpen) $done({});
+    return { ok: false, skipped: true };
   }
-
-  // Session 存在 + cron 拉起：会员检测（仅日志，节流）— 不在 http-request 路径
-  try {
-    await probeVipIfSession(opts, "cron-start", false);
-  } catch (e) {
-    log("vip probe on cron-start err", e);
-  }
-
-  // Beijing calendar day + hour slots (not device local TZ).
-  if (!isCheckinHourBeijing()) {
-    log("skip: not Beijing check-in hour", beijingParts());
-    $done({});
-    return;
+  if (!hasCookie && !hasAK) {
+    const msg =
+      "未捕获登录态：请打开 B 站浏览（直播/动态等）以抓取 Cookie(SESSDATA)。仅 access_key 无法 Web 签到";
+    log(msg);
+    // 失败立刻通知（节流：同一本地日最多 1 次无会话提示）
+    const localDay = deviceLocalDay();
+    if (store.noSessionFailNotifyDay !== localDay) {
+      store.noSessionFailNotifyDay = localDay;
+      writeStore(store);
+      notify(NAME, "签到失败", msg);
+    }
+    if (!fromOpen) $done({});
+    return { ok: false, failed: true };
   }
 
   const day = today(); // Asia/Shanghai YYYY-MM-DD
-  // Same Beijing day + already succeeded: skip remaining 0/10/19/21 slots.
-  // Next Beijing midnight: day string changes => runs again (once per BJ day, not forever).
-  if (store.lastRunDay === day && store.lastRunOk) {
-    log("already succeeded Beijing day, skip slot", day);
-    $done({});
-    return;
+  const st = dayState(store, day);
+  writeStore(store); // persist day flip clear
+
+  // 当天已成功 → 不再签（新键 dayState.ok；旧 lastRunOk 已随 store key 作废）
+  if (st.ok) {
+    log("already ok Beijing day, skip", day);
+    if (!fromOpen) $done({});
+    return { ok: true, skipped: true };
   }
 
-  // Avoid整点批量：北京时间时段内再随机延迟一段时间
-  const delayMs = randomCheckinDelayMs();
-  log("random delay ms", delayMs, "bj", beijingParts());
+  // 失败退避：保护期 / 下次可重试时间（不跨北京日）
+  const nowMs = Date.now();
+  if (st.nextRetryAt && nowMs < st.nextRetryAt) {
+    log(
+      "backoff protect",
+      "failCount=" + st.failCount,
+      "nextRetryAt=" + new Date(st.nextRetryAt).toISOString(),
+      "pending=" + (st.pending || []).join(",")
+    );
+    if (!fromOpen) $done({});
+    return { ok: false, skipped: true, backoff: true };
+  }
+
+  log(
+    "auth mode",
+    hasCookie ? "cookie+SESSDATA" : "access_key-only",
+    "token=" + (hasAK ? "yes" : "no"),
+    "fromOpen=" + fromOpen
+  );
+  // 打开 App 后台任务：有缓存会员状态则跳过重复探测，加快
+  try {
+    if (!(fromOpen && store.vipCheckedAt && store.isVip != null && Date.now() - Date.parse(store.vipCheckedAt) < 6 * 3600 * 1000)) {
+      await probeVipIfSession(opts, fromOpen ? "open-app" : "manual", false);
+    } else {
+      log("vip cache hit", store.isVip, store.vipDetail);
+    }
+  } catch (e) {
+    log("vip probe err", e);
+  }
+
+  // 极短抖动（后台执行，不挡请求）
+  const delayMs = fromOpen ? 200 + Math.floor(Math.random() * 800) : randomCheckinDelayMs();
+  log("checkin jitter ms", delayMs, "fromOpen=" + fromOpen, "bj", beijingParts());
   await sleep(delayMs);
 
-  // Re-check after delay: day/hour may have changed; still only act in slot hours
-  if (!isCheckinHourBeijing()) {
-    log("after delay: left check-in hour, skip", beijingParts());
-    $done({});
-    return;
-  }
-  const dayAfter = today();
-  if (store.lastRunDay === dayAfter && store.lastRunOk) {
-    log("after delay: already succeeded", dayAfter);
-    $done({});
-    return;
-  }
+  st.lastAttemptAt = new Date().toISOString();
+  writeStore(store);
 
   const cookie = store.cookie || "";
   const csrf = store.csrf || cookieMap(cookie).bili_jct || "";
   const accessKey = store.bili_app_token || "";
-  const baseHeaders = {
-    "User-Agent":
-      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BiliApp",
-    Referer: "https://www.bilibili.com/",
-    Origin: "https://www.bilibili.com",
-  };
-  if (cookie) baseHeaders.Cookie = cookie;
+  const baseHeaders = webHeaders(store, "https://www.bilibili.com/");
 
   // 大会员判断：只写日志，不弹窗；非会员整次签到跳过
   // Prefer cookie; if only access_key, still try nav with access_key query via detect
@@ -662,137 +870,256 @@ async function doCheckin(opts) {
   store.vipDetail = vip.detail || "";
   writeStore(store);
   log("vip detect:", vip.isVip ? "YES" : "NO", vip.detail || "");
-  if (!vip.isVip) {
-    log("skip checkin: not VIP (no notification)");
-    $done({});
-    return;
-  }
+  // 直播签到不要求大会员；大积分才要求。无 Cookie 时下面各任务会明确跳过/失败说明。
 
   const lines = [];
   let okAny = false;
+  let hardFail = false; // true if a required task failed (not skip)
 
-  // 1) Live sign
-  try {
-    let signUrl =
-      "https://api.live.bilibili.com/xlive/web-ucenter/v1/sign/DoSign";
-    if (accessKey) {
-      signUrl +=
-        (signUrl.indexOf("?") >= 0 ? "&" : "?") +
-        "access_key=" +
-        encodeURIComponent(accessKey);
-    }
-    const r = await http("GET", signUrl, baseHeaders);
-    const j = JSON.parse(r.data || "{}");
-    if (j.code === 0) {
-      okAny = true;
-      const d = j.data || {};
-      lines.push(
-        `直播签到: 成功 (${d.hadSignDays || "?"}/${d.allDays || "?"}天) ${
-          d.text || ""
-        }`
-      );
-    } else if (j.code === 1011040) {
-      okAny = true;
-      lines.push("直播签到: 今日已签");
-    } else {
-      lines.push(`直播签到: 失败 code=${j.code} ${j.message || j.msg || ""}`);
-    }
-  } catch (e) {
-    lines.push("直播签到: 异常 " + e);
+  if (!hasCookie) {
+    lines.push(
+      "提示: 无 Cookie/SESSDATA，大积分/分享等 Web 接口无法鉴权"
+    );
+    hardFail = true;
   }
 
-  // 2) VIP 大积分签到（大会员；非会员会失败，忽略）
-  // POST https://api.bilibili.com/pgc/activity/score/task/sign
+  // 1) 直播签到已下线（code=1 签到活动已下线）— 已移除
+
+  // 2) 大会员大积分签到（新接口 sign2；旧 /score/task/sign 会 6007000/-663）
+  // 实测成功：POST /pgc/activity/score/task/sign2?csrf=...  JSON body {device,t,ts}
+  // Referer: big.bilibili.com；Cookie 仅 SESSDATA 体系，不要混裸 access_key
   try {
-    const headers = Object.assign({}, baseHeaders, {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Referer: "https://big.bilibili.com/",
-      Origin: "https://www.bilibili.com",
-    });
-    let body = "";
-    if (csrf) body = "csrf=" + encodeURIComponent(csrf);
-    if (store.bili_app_token) {
-      body = (body ? body + "&" : "") + "access_key=" + encodeURIComponent(store.bili_app_token);
-    }
-    const r = await http(
-      "POST",
-      "https://api.bilibili.com/pgc/activity/score/task/sign",
-      headers,
-      body
-    );
-    let j = {};
-    try {
-      j = JSON.parse(r.data || "{}");
-    } catch (e) {
-      j = {};
-    }
-    // 0 success; common already-signed codes vary — treat message hints as ok
-    const msg = String(j.message || j.msg || "");
-    if (j.code === 0) {
-      okAny = true;
-      lines.push("大积分签到: 成功");
-    } else if (
-      /已签|重复|already|今日已|签到过/i.test(msg) ||
-      j.code === 71000 ||
-      j.code === 6000002
-    ) {
-      okAny = true;
-      lines.push("大积分签到: 今日已签 (" + (j.code != null ? j.code : "") + ")");
-    } else if (j.code === -403 || j.code === 6001001 || /非大会员|不是大会员|权限不足|未开通/i.test(msg)) {
-      lines.push("大积分签到: 非会员/无权限，跳过");
+    const isVip = !!store.isVip;
+    if (!isVip) {
+      lines.push("大积分签到: 跳过（非大会员）");
+    } else if (!cookie || !cookie.includes("SESSDATA")) {
+      lines.push("大积分签到: 跳过（无 Cookie/SESSDATA）");
+      hardFail = true;
+    } else if (!csrf) {
+      lines.push("大积分签到: 跳过（无 bili_jct/csrf）");
+      hardFail = true;
     } else {
-      lines.push(
-        "大积分签到: 失败 code=" +
-          (j.code != null ? j.code : r.status) +
-          " " +
-          msg
-      );
+      // 先查三天签状态（可选）
+      let already = false;
+      try {
+        const info = await http(
+          "GET",
+          "https://api.bilibili.com/x/vip/vip_center/sign_in/three_days_sign?csrf=" +
+            encodeURIComponent(csrf),
+          webHeaders(store, "https://big.bilibili.com/mobile/bigPoint/task"),
+          null,
+          8
+        );
+        const ji = JSON.parse(info.data || "{}");
+        if (ji.code === 0 && ji.data && ji.data.three_day_sign && ji.data.three_day_sign.signed) {
+          already = true;
+          okAny = true;
+          lines.push("大积分签到: 今日已签（three_day_sign）");
+        }
+      } catch (e) {
+        log("three_day_sign info err", e);
+      }
+
+      if (!already) {
+        const headers = webHeaders(store, "https://big.bilibili.com/mobile/bigPoint/task");
+        headers["Content-Type"] = "application/json;charset=UTF-8";
+        headers.Origin = "https://big.bilibili.com";
+        headers.Referer = "https://big.bilibili.com/mobile/bigPoint/task";
+        // 关键：不要附带 access_key（会把有效 Cookie 鉴权打成 -663）
+        const tMs = Date.now();
+        const bodyObj = { device: "phone", t: tMs, ts: Math.floor(tMs / 1000) };
+        const url =
+          "https://api.bilibili.com/pgc/activity/score/task/sign2?csrf=" +
+          encodeURIComponent(csrf);
+        const r = await http("POST", url, headers, JSON.stringify(bodyObj), 10);
+        let j = {};
+        try {
+          j = JSON.parse(r.data || "{}");
+        } catch (e) {
+          j = {};
+        }
+        const msg = String(j.message || j.msg || "");
+        if (j.code === 0) {
+          okAny = true;
+          const d = j.data || {};
+          lines.push(
+            "大积分签到: 成功" +
+              (d.count != null ? " count=" + d.count : "")
+          );
+        } else if (
+          /已签|重复|already|今日已|签到过|已完成/i.test(msg) ||
+          j.code === 71000 ||
+          j.code === 6000002
+        ) {
+          okAny = true;
+          lines.push("大积分签到: 今日已签 (" + (j.code != null ? j.code : "") + ")");
+        } else if (j.code === -663) {
+          hardFail = true;
+          lines.push(
+            "大积分签到: 失败 code=-663 鉴权失败（请确认 Cookie 完整含 SESSDATA+bili_jct，且未混入 access_key）"
+          );
+          log("bigpoint sign2 raw", String(r.data || "").slice(0, 200));
+        } else {
+          hardFail = true;
+          lines.push(
+            "大积分签到: 失败 code=" +
+              (j.code != null ? j.code : r.status) +
+              " " +
+              msg
+          );
+          log("bigpoint sign2 raw", String(r.data || "").slice(0, 200));
+        }
+      }
     }
   } catch (e) {
+    hardFail = true;
     lines.push("大积分签到: 异常 " + e);
   }
 
-  // 3) Exp reward status
+  // 3) 经验任务：查询 + 尝试自动分享（share/add）
+  // 分享: POST https://api.bilibili.com/x/web-interface/share/add  body: aid + csrf
+  // 先拉排行榜取一个 aid（无需登录）
   try {
-    const r = await http(
+    let exp = null;
+    const r0 = await http(
       "GET",
       "https://api.bilibili.com/x/member/web/exp/reward",
-      baseHeaders
+      webHeaders(store, "https://www.bilibili.com/"),
+      null,
+      8
     );
-    const j = JSON.parse(r.data || "{}");
-    if (j.code === 0 && j.data) {
-      const d = j.data;
+    try {
+      const j0 = JSON.parse(r0.data || "{}");
+      if (j0.code === 0) exp = j0.data;
+      else lines.push("经验任务: 查询 code=" + j0.code);
+    } catch (e) {
+      lines.push("经验任务: 查询解析失败");
+    }
+
+    if (exp && exp.share) {
       lines.push(
-        `经验任务: 登录${d.login ? "✓" : "✗"} 观看${d.watch ? "✓" : "✗"} 分享${
-          d.share ? "✓" : "✗"
-        } 投币${d.coins || 0}`
+        "经验任务: 登录" +
+          (exp.login ? "✓" : "✗") +
+          " 观看" +
+          (exp.watch ? "✓" : "✗") +
+          " 分享✓ 投币" +
+          (exp.coins || 0) +
+          "（分享已完成）"
       );
-    } else {
-      lines.push(`经验任务: code=${j.code}`);
+      // 仅登录/观看不能算签到成功（否则失败后被 lastRunOk 卡住）
+    } else if (exp && cookie && csrf) {
+      // auto share
+      let aid = null;
+      try {
+        const rr = await http(
+          "GET",
+          "https://api.bilibili.com/x/web-interface/ranking/v2?rid=0&type=all",
+          webHeaders(store, "https://www.bilibili.com/"),
+          null,
+          8
+        );
+        const jr = JSON.parse(rr.data || "{}");
+        const list = (jr.data && jr.data.list) || [];
+        if (list.length) {
+          const pick = list[Math.floor(Math.random() * Math.min(list.length, 10))];
+          aid = pick.aid || (pick.stat && pick.stat.aid);
+        }
+      } catch (e) {
+        log("ranking for share err", e);
+      }
+      if (!aid) {
+        lines.push(
+          "经验任务: 登录" +
+            (exp.login ? "✓" : "✗") +
+            " 观看" +
+            (exp.watch ? "✓" : "✗") +
+            " 分享✗ 投币" +
+            (exp.coins || 0) +
+            "（未取到 aid，分享跳过）"
+        );
+      } else {
+        const sh = webHeaders(store, "https://www.bilibili.com/video/");
+        sh["Content-Type"] = "application/x-www-form-urlencoded";
+        const body =
+          "aid=" +
+          encodeURIComponent(String(aid)) +
+          "&eab_x=2&ramval=0&source=web_normal&ga=1&csrf=" +
+          encodeURIComponent(csrf);
+        const rs = await http(
+          "POST",
+          "https://api.bilibili.com/x/web-interface/share/add",
+          sh,
+          body,
+          8
+        );
+        let js = {};
+        try {
+          js = JSON.parse(rs.data || "{}");
+        } catch (e) {}
+        // 0 ok; 71000 already shared etc.
+        if (js.code === 0 || js.code === 71000 || /已分享|重复/i.test(String(js.message || ""))) {
+          okAny = true;
+          lines.push(
+            "经验任务: 分享成功 aid=" +
+              aid +
+              "；登录" +
+              (exp.login ? "✓" : "✗") +
+              " 观看" +
+              (exp.watch ? "✓" : "✗") +
+              " 投币" +
+              (exp.coins || 0)
+          );
+        } else {
+          hardFail = true;
+          lines.push(
+            "经验任务: 分享失败 code=" +
+              js.code +
+              " " +
+              (js.message || js.msg || "") +
+              "；登录" +
+              (exp.login ? "✓" : "✗") +
+              " 观看" +
+              (exp.watch ? "✓" : "✗")
+          );
+        }
+      }
+    } else if (exp) {
+      lines.push(
+        "经验任务: 登录" +
+          (exp.login ? "✓" : "✗") +
+          " 观看" +
+          (exp.watch ? "✓" : "✗") +
+          " 分享" +
+          (exp.share ? "✓" : "✗") +
+          " 投币" +
+          (exp.coins || 0)
+      );
     }
   } catch (e) {
     lines.push("经验任务: 异常 " + e);
   }
 
-  // 4) VIP privilege receive (type=1 B-coin coupon) - monthly, ignore if not eligible
-  if (csrf) {
+  // 4) VIP privilege receive - ignore already claimed
+  if (csrf && cookie) {
     try {
-      const body = `type=1&csrf=${encodeURIComponent(csrf)}`;
-      const headers = Object.assign({}, baseHeaders, {
-        "Content-Type": "application/x-www-form-urlencoded",
-      });
+      const body = "type=1&csrf=" + encodeURIComponent(csrf);
+      const headers = webHeaders(store, "https://account.bilibili.com/");
+      headers["Content-Type"] = "application/x-www-form-urlencoded";
       const r = await http(
         "POST",
         "https://api.bilibili.com/x/vip/privilege/receive",
         headers,
-        body
+        body,
+        8
       );
       const j = JSON.parse(r.data || "{}");
       if (j.code === 0) {
         okAny = true;
         lines.push("大会员福利: 领取成功");
+      } else if (/已领取|已经领取|领取过/i.test(String(j.message || j.msg || ""))) {
+        lines.push("大会员福利: 已领取过（忽略）");
       } else {
-        lines.push(`大会员福利: ${j.message || j.msg || j.code}`);
+        lines.push("大会员福利: " + (j.message || j.msg || j.code));
       }
     } catch (e) {
       lines.push("大会员福利: 异常 " + e);
@@ -800,40 +1127,93 @@ async function doCheckin(opts) {
   }
 
   // 5) silver2coin optional
-  if (opts.银瓜子换硬币 && csrf) {
+  if (opts.银瓜子换硬币 && csrf && cookie) {
     try {
-      const body = `csrf_token=${encodeURIComponent(
-        csrf
-      )}&csrf=${encodeURIComponent(csrf)}`;
-      const headers = Object.assign({}, baseHeaders, {
-        "Content-Type": "application/x-www-form-urlencoded",
-      });
+      const body =
+        "csrf_token=" +
+        encodeURIComponent(csrf) +
+        "&csrf=" +
+        encodeURIComponent(csrf);
+      const headers = webHeaders(store, "https://live.bilibili.com/");
+      headers["Content-Type"] = "application/x-www-form-urlencoded";
       const r = await http(
         "POST",
         "https://api.live.bilibili.com/xlive/revenue/v1/wallet/silver2coin",
         headers,
-        body
+        body,
+        8
       );
       const j = JSON.parse(r.data || "{}");
       if (j.code === 0) {
         okAny = true;
         lines.push("银瓜子换硬币: 成功");
       } else {
-        lines.push(`银瓜子换硬币: ${j.message || j.msg || j.code}`);
+        lines.push("银瓜子换硬币: " + (j.message || j.msg || j.code));
       }
     } catch (e) {
       lines.push("银瓜子换硬币: 异常 " + e);
     }
   }
 
-  store.lastRunDay = day;
-  store.lastRunOk = okAny;
-  store.lastResult = lines.join(" | ");
-  writeStore(store);
+  // ---- 汇总：成功键 dayState.ok；失败记 pending + 退避 ----
+  // 解析 lines 粗分 pending 项（大积分/分享）
+  const pending = [];
+  const textAll = lines.join("\n");
+  if (/大积分签到: 失败|大积分签到: 异常|大积分签到: 跳过（无 Cookie/i.test(textAll)) {
+    pending.push("bigpoint");
+  }
+  if (/经验任务: 分享失败|经验任务:.*分享✗|经验任务: 异常/i.test(textAll)) {
+    pending.push("share");
+  }
+  // 无 Cookie 时两项都可能挂
+  if (/无 Cookie\/SESSDATA/i.test(textAll) && pending.indexOf("bigpoint") < 0) {
+    pending.push("bigpoint");
+  }
 
-  notify(NAME, okAny ? "完成" : "部分失败", lines.join("\n"));
-  log(lines.join(" | "));
-  $done({});
+  // 成功定义：大积分成功/已签，或分享成功，或银瓜子成功；仅登录/观看/已领福利不算整天成功
+  const realOk =
+    /大积分签到: 成功|大积分签到: 今日已签/i.test(textAll) ||
+    /经验任务: 分享成功|经验任务:.*分享✓|分享已完成/i.test(textAll) ||
+    /银瓜子换硬币: 成功/i.test(textAll) ||
+    (!!okAny && pending.length === 0 && !hardFail);
+
+  st.lastResult = lines.join(" | ");
+  st.lastAttemptAt = new Date().toISOString();
+
+  if (realOk && pending.length === 0) {
+    st.ok = true;
+    st.pending = [];
+    st.failCount = 0;
+    st.nextRetryAt = 0;
+    writeStore(store);
+    notify(NAME, "签到完成", lines.join("\n"));
+    log("checkin done ok", day, lines.join(" | "));
+  } else {
+    st.ok = false;
+    st.pending = pending.length ? pending : hardFail ? ["unknown"] : st.pending || [];
+    st.failCount = (st.failCount || 0) + 1;
+    st.nextRetryAt = computeNextRetryMs(st.failCount, Date.now());
+    writeStore(store);
+    const nextStr = new Date(st.nextRetryAt).toISOString();
+    const body =
+      (lines.join("\n") || "未知错误") +
+      "\n\n待重试: " +
+      (st.pending.join(",") || "-") +
+      "\n下次最早: " +
+      nextStr +
+      "（退避不跨北京日，次日清零）";
+    notify(NAME, "签到失败", body);
+    log(
+      "checkin done fail",
+      "failCount=" + st.failCount,
+      "pending=" + st.pending.join(","),
+      "next=" + nextStr,
+      lines.join(" | ")
+    );
+  }
+
+  if (!fromOpen) $done({});
+  return { ok: !!st.ok, lines: lines, pending: st.pending };
 }
 
 (async () => {
@@ -849,33 +1229,57 @@ async function doCheckin(opts) {
   const store0 = readStore();
   const hasSession = !!(
     (store0.cookie && String(store0.cookie).includes("SESSDATA")) ||
-    (store0.access_key && String(store0.access_key).length > 8)
+    (store0.bili_app_token && String(store0.bili_app_token).length > 8)
   );
   // 任何触发都必须先打这条，方便在 Surge 日志里确认脚本真的跑了
   log(
     "boot",
     "v=" + SCRIPT_VERSION,
-    "type=" + (stype || (typeof $request !== "undefined" && $request ? "http-request" : "cron?")),
+    "store=" + STORE_KEY,
+    "type=" + (stype || (typeof $request !== "undefined" && $request ? "http-request" : "?")),
     "name=" + sname,
     "checkin=" + !!opts.自动签到,
     "session=" + (hasSession ? "yes" : "no"),
     "bj=" + JSON.stringify(beijingParts())
   );
 
-  // Surge: http-request = capture; event = network-changed; else cron/manual
+  // 无 cron：打开 B 站 trigger
+  // 重要：Surge 在 http-request 里 $done() 之后会结束脚本，setTimeout 不可靠 → 签到必须在 $done 之前 await
+  // 仅在 isCheckinTriggerUrl（fingerprint/tab/mine/splash/nav）上签到，避免拖慢 feed
   if (typeof $request !== "undefined" && $request && $request.url) {
-    log("path=capture", String($request.url).slice(0, 120));
-    await captureCookie(opts);
-  } else if (stype === "event") {
-    log("path=event network-changed, probe vip if session");
-    if (!hasSession) {
-      log("event: no session yet — open Bilibili app once to capture Cookie");
+    const reqUrl = String($request.url);
+    log("path=open-app capture", reqUrl.slice(0, 120));
+    try {
+      await captureCookie(opts);
+    } catch (e) {
+      log("capture err", e);
     }
-    await probeVipIfSession(opts, "network-changed", false);
+    const should =
+      opts.自动签到 && typeof isCheckinTriggerUrl === "function" && isCheckinTriggerUrl(reqUrl);
+    if (should) {
+      log("path=open-app checkin BEFORE $done (reliable)");
+      try {
+        await doCheckin(opts, { fromOpen: true });
+      } catch (e) {
+        log("open-app checkin err", e);
+        notify(NAME, "签到失败", String(e));
+      }
+    } else {
+      log("path=capture only (not trigger url), skip checkin this request");
+    }
+    $done({});
+  } else if (stype === "event") {
+    log("path=event network-changed → checkin");
+    try {
+      if (opts.自动签到) await doCheckin(opts, { fromOpen: true });
+      else await probeVipIfSession(opts, "network-changed", false);
+    } catch (e) {
+      log("event checkin err", e);
+    }
     $done({});
   } else {
-    log("path=cron/manual doCheckin");
-    await doCheckin(opts);
+    log("path=manual doCheckin");
+    await doCheckin(opts, { fromOpen: false });
   }
 })().catch((e) => {
   log("fatal", e);

@@ -1,11 +1,36 @@
 #!name=哔哩哔哩去广告（融合增强）
-#!desc=Surge 纯网络 MITM：B 站广告屏蔽 + 可选自动签到。v2.0.6
+#!desc=Surge 纯网络 MITM：B 站广告屏蔽 + 可选自动签到。v2.0.7
 #!author=babana0091-sudo
 #!homepage=https://github.com/babana0091-sudo/bilibili-adblock-surge
 #!category=去广告
-#!version=2.0.6
-#!arguments=ad_normal:true,ad_pause:true,ad_game:true,ad_drama:true,checkin:true,silver2coin:false,block_risk:false,resign:false,debug:false
-#!arguments-desc=ad_normal(常规广告): 开屏/推荐/信息流等\n默认 true\n\nad_pause(暂停广告): 暂停页商业卡\n默认 true\n\nad_game(小游戏广告)\n默认 true\n\nad_drama(短剧广告)\n默认 true\n\ncheckin(自动签到)\n默认 true\n\nsilver2coin(银瓜子换硬币)\n默认 false\n\nblock_risk(拦截Gaia风控上报)\n默认 false\n\ndebug(调试日志)\n默认 false
+#!version=2.0.7
+#!arguments=ad_normal:true,ad_pause:true,ad_game:true,ad_drama:true,checkin:true,silver2coin:false,block_risk:false,reset:false,debug:false
+#!arguments-desc=ad_normal(常规广告): 开屏/推荐/信息流等
+默认 true
+
+ad_pause(暂停广告): 暂停页商业卡
+默认 true
+
+ad_game(小游戏广告)
+默认 true
+
+ad_drama(短剧广告)
+默认 true
+
+checkin(自动签到): 打开 App 后台签到
+默认 true
+
+silver2coin(银瓜子换硬币)
+默认 false
+
+block_risk(拦截Gaia风控上报)
+默认 false
+
+reset(重新签到): 设为 true 后打开 B 站会强制再签一次；脚本会自动只生效一次（参数请再改回 false）
+默认 false
+
+debug(调试日志)
+默认 false
 
 [Rule]
 URL-REGEX,"^http:\/\/upos-sz-static\.bilivideo\.com\/ssaxcode\/\w{2}\/\w{2}\/\w{32}-1-SPLASH",REJECT-TINYGIF
@@ -25,10 +50,10 @@ bili-game-json = type=http-response,pattern=^https?:\/\/(?:line\d?-h5-mobile-api
 bili-gaia-block = type=http-request,pattern=^https?:\/\/api\.bilibili\.com\/x\/internal\/gaia-gateway\/(?:ExClimbKunLun|ExClimbCongLing|ExBadBasket),script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/dev/js/gaia-block.js,requires-body=0,argument=block_risk={{{block_risk}}}&debug={{{debug}}},script-update-interval=0
 
 # VIP/签到：打开 App 触发后台签到（不阻塞请求）；失败立即通知。日志搜 [BiliCheckin]
-bili-checkin-capture = type=http-request,timeout=15,pattern=^https?:\/\/(?:[\w-]+\.)*(?:bilibili\.com|biliapi\.net|biliapi\.com)\/,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/dev/js/checkin.js,requires-body=0,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&resign={{{resign}}}&debug={{{debug}}},script-update-interval=0
+bili-checkin-capture = type=http-request,timeout=15,pattern=^https?:\/\/(?:[\w-]+\.)*(?:bilibili\.com|biliapi\.net|biliapi\.com)\/,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/dev/js/checkin.js,requires-body=0,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&reset={{{reset}}}&debug={{{debug}}},script-update-interval=0
 # Session 存在时：网络变化/引擎拉起类 event 额外查一次会员（仅日志，脚本内节流）
 # 无 cron：打开 B 站（命中 capture 的轻量请求）时自动签到；失败立即通知
-bili-checkin-boot = type=event,event-name=network-changed,timeout=20,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/dev/js/checkin.js,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&resign={{{resign}}}&debug={{{debug}}},script-update-interval=0
+bili-checkin-boot = type=event,event-name=network-changed,timeout=20,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/dev/js/checkin.js,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&reset={{{reset}}}&debug={{{debug}}},script-update-interval=0
 
 [MITM]
 hostname = %APPEND% app.bilibili.com, passport.bilibili.com, data.bilibili.com, api.bilibili.com, api.biliapi.net, app.biliapi.net, grpc.biliapi.net, api.live.bilibili.com, api.vc.bilibili.com, manga.bilibili.com, cm.bilibili.com, miniapp.bilibili.com, line1-h5-mobile-api.biligame.com, line3-h5-mobile-api.biligame.com, game-attribute.biligame.com, app.biligame.com

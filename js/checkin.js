@@ -17,7 +17,7 @@
 // Storage key: bili_adblock_checkin
 
 const STORE_KEY = "bili_adblock_checkin";
-const SCRIPT_VERSION = "2.0.6";
+const SCRIPT_VERSION = "2.0.7";
 const NAME = "哔哩签到";
 
 function parseArgs(raw) {
@@ -25,13 +25,14 @@ function parseArgs(raw) {
     自动签到: true,
     银瓜子换硬币: false,
     调试日志: false,
-    重新签到: false,
+    重新签到: false, // maps from reset
     checkin: true,
     silver2coin: false,
-    resign: false,
+    reset: false,
     debug: false,
   };
-  if (raw == null || raw === "") return out;
+  if (raw == null || raw === "")   if (out.reset !== undefined) out.重新签到 = !!out.reset;
+return out;
   let src = raw;
   if (typeof raw === "string") {
     try {
@@ -764,14 +765,30 @@ async function doCheckin(opts, flags) {
   }
 
   const day = today(); // Asia/Shanghai YYYY-MM-DD
-  const forceResign = !!(opts.重新签到 || opts.resign);
-  if (forceResign) {
-    log("resign=true: force re-checkin, clear lastRunOk for day", day);
+  // reset=true：强制重签。脚本无法改写模块参数 UI，用本地存储做「只生效一次」：
+  // - 检测到 reset=true 且尚未消费 → 清 lastRunOk 并签一次，标记已消费
+  // - 保持 true 不会反复强制；改回 false 会清除消费标记，下次再 true 可再强制
+  const resetOn = !!(opts.重新签到 || opts.reset);
+  let forceResign = false;
+  if (!resetOn) {
+    if (store.resetConsumed) {
+      store.resetConsumed = false;
+      writeStore(store);
+      log("reset=false: clear one-shot consume flag");
+    }
+  } else if (resetOn && !store.resetConsumed) {
+    forceResign = true;
+    store.resetConsumed = true; // one-shot; 等同「自动用掉」这次 true
     store.lastRunOk = false;
     store.lastRunDay = "";
     store.lastAttemptAt = "";
     writeStore(store);
-  } else if (store.lastRunDay === day && store.lastRunOk) {
+    log("reset=true one-shot: force re-checkin (param UI cannot auto-set false; leave true is OK, will not re-force until toggled)");
+  } else if (resetOn && store.resetConsumed) {
+    log("reset=true already consumed this toggle; normal skip rules apply");
+  }
+
+  if (!forceResign && store.lastRunDay === day && store.lastRunOk) {
     log("already succeeded Beijing day, skip", day);
     if (!fromOpen) $done({});
     return { ok: true, skipped: true };
@@ -1115,7 +1132,8 @@ async function doCheckin(opts, flags) {
   } else {
     let extra = "";
     if (forceResign) {
-      extra = "\n\n重新签到已完成：请把模块参数 resign 改回 false，避免每次打开都强制重签";
+      extra =
+        "\n\n已强制重签一次（reset 一次性生效）。脚本无法自动改模块参数，请把 reset 改回 false；若一直 true 也不会重复强制。";
     }
     notify(NAME, "签到完成", lines.join("\n") + extra);
   }

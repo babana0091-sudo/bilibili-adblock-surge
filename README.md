@@ -50,7 +50,7 @@ https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bi
 | `checkin` | true | 自动签到 |
 | `silver2coin` | false | 银瓜子换硬币 |
 | `block_risk` | false | 拦截 Gaia 风控上报 |
-| `resign` | false | **重新签到**：设为 `true` 强制再签一次，成功后请改回 `false` |
+| `reset` | false | **重新签到**：设为 `true` 强制再签一次，成功后请改回 `false` |
 | `debug` | false | 调试日志 |
 
 ## 自动签到说明

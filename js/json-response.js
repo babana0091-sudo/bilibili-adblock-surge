@@ -61,12 +61,29 @@ function log(enabled, ...args) {
 }
 
 
-/** 竖屏流红果/天马广告短剧卡：整卡从 items 移除，用户刷不到 */
+/**
+ * 竖屏 Story 流「红果广告短剧」整卡识别。
+ *
+ * 从点击埋点 original_json 还原的推流 item 形态（猜测与 feed/index/story 一致）：
+ * {
+ *   goto: "vertical_av",          // 竖屏播放
+ *   card_goto: "ad_av",           // 广告 av 卡（普通视频多为 vertical_av）
+ *   card_type: "cm_v2",           // 商业卡类型
+ *   idx, title, desc, uri,
+ *   args: { up_id, up_name, aid },
+ *   player_args: { duration, aid, type:"av", cid },
+ *   three_point: { dislike_reasons: [...] },
+ *   // 推流里常见额外字段（埋点侧也有）：
+ *   // ad_info / ad_cb / is_ad / from_spmid / creative_id
+ *   // uri 常带 ad_story_extra、creative_id、from_spmid=ad.tianma...
+ * }
+ * 普通竖屏视频对照：card_goto/goto 多为 vertical_av，card_type 非 cm_v2，无 ad_info。
+ * 策略：整卡从 data.items 移除，而不是只去下载条。
+ */
 function isHongguoOrAdStory(item) {
   if (!item || typeof item !== "object") return false;
-  const goto = String(
-    item.card_goto || item.goto || item.type || item.cardType || ""
-  ).toLowerCase();
+  const cardGoto = String(item.card_goto || "").toLowerCase();
+  const goto = String(item.goto || item.type || item.cardType || "").toLowerCase();
   const cardType = String(item.card_type || item.cardType || "").toLowerCase();
   const uri = String(
     item.uri || item.link || item.jump_url || item.blink || item.route || ""
@@ -74,11 +91,11 @@ function isHongguoOrAdStory(item) {
   const title = String(
     item.title || item.desc || item.subtitle || item.rcmd_reason || ""
   );
+  const desc = String(item.desc || "");
   const up = String(
     (item.args && (item.args.up_name || item.args.rname)) ||
       item.up_name ||
       item.author_name ||
-      item.desc ||
       ""
   );
   const spmid = String(
@@ -87,45 +104,63 @@ function isHongguoOrAdStory(item) {
       (item.three_point_v2 && item.three_point_v2.spmid) ||
       ""
   );
+  const text = title + desc + up;
   const blob = (
+    cardGoto +
+    " " +
     goto +
     " " +
     cardType +
     " " +
     uri +
     " " +
-    title +
-    " " +
-    up +
+    text +
     " " +
     spmid +
     " " +
     JSON.stringify(item.ad_info || {}) +
     " " +
-    String(item.ad_story_extra || "")
+    String(item.ad_story_extra || "") +
+    " " +
+    String(item.track_id || item.trackid || "")
   ).toLowerCase();
 
-  // 抓包特征：card_goto=ad_av + up/desc 含红果；from_spmid=ad.tianma...
-  if (/红果/.test(title + up + uri) || blob.includes("hongguo")) return true;
-  if (/免费短剧|海量短剧|热门短剧/.test(title + up)) return true;
+  // A. 红果文案 / UP（最稳）
+  if (/红果/.test(text + uri) || blob.includes("hongguo")) return true;
+  if (/免费短剧|海量短剧|热门短剧/.test(text)) return true;
+
+  // B. 天马广告位 spmid
   if (spmid.includes("ad.tianma") || blob.includes("ad.tianma")) return true;
-  if (goto === "ad_av" || goto.startsWith("ad_")) {
-    // 广告 av 卡（含竖屏广告短剧）
+
+  // C. 商业 cm 卡 + 竖屏 av（抓包：card_type=cm_v2 + goto=vertical_av）
+  if (
+    (cardType === "cm_v2" || cardType.startsWith("cm")) &&
+    (goto === "vertical_av" || cardGoto === "ad_av" || /story\//.test(uri))
+  ) {
+    return true;
+  }
+
+  // D. 明确广告 av 卡
+  if (cardGoto === "ad_av" || cardGoto.startsWith("ad_")) return true;
+  if (goto === "ad_av" || (goto.startsWith("ad_") && /av|story|vertical/.test(goto + uri)))
+    return true;
+
+  // E. uri 广告参数（ad_story_extra / creative_id + story）
+  if (
+    /ad_story_extra|creative_id=|from_spmid=ad\./i.test(uri) &&
+    (/story\//.test(uri) || goto === "vertical_av" || cardGoto.includes("ad"))
+  ) {
+    return true;
+  }
+
+  // F. 通用广告字段 + 短剧/竖屏特征
+  if (item.ad_info || item.ad_cb || item.is_ad || item.is_ad_loc) {
     if (
-      /红果|短剧|playlet|tianma|creative_id|ad_story/.test(blob) ||
-      item.ad_info ||
-      item.ad_cb ||
-      item.is_ad ||
-      item.is_ad_loc
+      /红果|短剧|playlet|tianma|snssdk|download|story|vertical_av|ad_av/.test(blob)
     )
       return true;
   }
-  if (item.ad_info || item.ad_cb || item.is_ad || item.is_ad_loc) {
-    if (/红果|短剧|playlet|tianma|snssdk|download/.test(blob)) return true;
-  }
-  // uri 带 ad_story_extra / creative_id 的 story 广告
-  if (/ad_story_extra|creative_id=/.test(uri) && /story|ad_av|vertical/.test(blob))
-    return true;
+
   return false;
 }
 
@@ -291,6 +326,8 @@ function handleSplash(body, opts) {
 }
 
 function handleFeed(body, opts, url) {
+  // 推流：{ code, data: { items: [ storyItem, ... ] } }
+  // 红果广告 item 见 isHongguoOrAdStory 注释中的结构体还原
   if (!body.data) return body;
   const isStory = /feed\/index\/story/i.test(url);
   // story/cart 等纯购物/推广挂件：可直接清空

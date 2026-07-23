@@ -1,9 +1,10 @@
 // Bilibili daily check-in for Surge (network only)
 // - type=http-request on fingerprint: capture Cookie / access_key
-// - type=cron: run daily tasks with stored credentials
+// - type=cron: try at 00:00 / 10:00 / 19:00 / 21:00 (device local time)
+//   First success of the day marks lastRunOk; later slots no-op.
 //
 // Tasks (best-effort, API may change):
-// 1) live DoSign
+// 1) live DoSign  (GET /xlive/web-ucenter/v1/sign/DoSign)
 // 2) exp/reward status
 // 3) vip privilege receive (monthly B-coin coupon if eligible)
 // 4) silver2coin (optional)
@@ -196,9 +197,11 @@ async function doCheckin(opts) {
   }
 
   const day = today();
+  // One success per local calendar day: later cron slots skip entirely.
   if (store.lastRunDay === day && store.lastRunOk) {
-    log("already ran today");
-    // still allow rerun silently without spam
+    log("already succeeded today, skip slot");
+    $done({});
+    return;
   }
 
   const cookie = store.cookie;

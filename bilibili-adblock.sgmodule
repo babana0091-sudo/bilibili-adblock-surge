@@ -1,9 +1,9 @@
 #!name=哔哩哔哩去广告（融合增强）
-#!desc=Surge 纯网络 MITM：B 站广告屏蔽 + 可选自动签到。v2.0.0
+#!desc=Surge 纯网络 MITM：B 站广告屏蔽 + 可选自动签到。v2.1.0
 #!author=babana0091-sudo
 #!homepage=https://github.com/babana0091-sudo/bilibili-adblock-surge
 #!category=去广告
-#!version=2.0.0
+#!version=2.1.0
 #!arguments=ad_normal:true,ad_pause:true,ad_game:true,ad_drama:true,checkin:true,silver2coin:false,block_risk:false,debug:false
 #!arguments-desc=ad_normal(常规广告): 开屏/推荐/信息流等\n默认 true\n\nad_pause(暂停广告): 暂停页商业卡\n默认 true\n\nad_game(小游戏广告)\n默认 true\n\nad_drama(短剧广告)\n默认 true\n\ncheckin(自动签到)\n默认 true\n\nsilver2coin(银瓜子换硬币)\n默认 false\n\nblock_risk(拦截Gaia风控上报)\n默认 false\n\ndebug(调试日志)\n默认 false
 
@@ -25,7 +25,8 @@ bili-game-json = type=http-response,pattern=^https?:\/\/(?:line\d?-h5-mobile-api
 bili-gaia-block = type=http-request,pattern=^https?:\/\/api\.bilibili\.com\/x\/internal\/gaia-gateway\/(?:ExClimbKunLun|ExClimbCongLing|ExBadBasket),script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/gaia-block.js,requires-body=0,argument=block_risk={{{block_risk}}}&debug={{{debug}}},script-update-interval=0
 
 bili-checkin-capture = type=http-request,pattern=^https?:\/\/app\.bilibili\.com\/x\/resource\/fingerprint\?,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/checkin.js,requires-body=0,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&debug={{{debug}}},script-update-interval=0
-bili-checkin-cron = type=cron,cronexp=30 7 * * *,wake-system=1,timeout=30,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/checkin.js,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&debug={{{debug}}},script-update-interval=0
+# 自动签到：本地时间 0/10/19/21 点各试一次；当日成功后跳过后续时段
+bili-checkin-cron = type=cron,cronexp=0 0,10,19,21 * * *,wake-system=1,timeout=30,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/checkin.js,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&debug={{{debug}}},script-update-interval=0
 
 [MITM]
 hostname = %APPEND% app.bilibili.com, api.bilibili.com, api.biliapi.net, app.biliapi.net, grpc.biliapi.net, api.live.bilibili.com, api.vc.bilibili.com, manga.bilibili.com, cm.bilibili.com, miniapp.bilibili.com, line1-h5-mobile-api.biligame.com, line3-h5-mobile-api.biligame.com, game-attribute.biligame.com, app.biligame.com

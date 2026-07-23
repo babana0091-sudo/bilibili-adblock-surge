@@ -2,11 +2,11 @@
 // - open App → capture session → background checkin (non-blocking)
 // - Beijing day success key: dayOk (store key v2, old lastRunOk discarded)
 // - Failures: record pending items; backoff 30m → 1h → 2h … never cross BJ midnight
-// - Tasks: 大积分 / 经验分享 / 福利 / 可选银瓜子；直播签到已下线
+// - Tasks: 经验分享(全员) / 大积分+等级加速包+卡券(仅大会员) / 可选银瓜子；直播签到已下线
 // Storage: bili_adblock_checkin_v2
 
 const STORE_KEY = "bili_adblock_checkin_v2"; // v2: 换键丢弃旧 lastRunOk，避免误标成功导致不再签
-const SCRIPT_VERSION = "2.0.12";
+const SCRIPT_VERSION = "2.0.13";
 const NAME = "哔哩签到";
 
 function parseArgs(raw) {
@@ -995,125 +995,17 @@ async function doCheckin(opts, flags) {
 
   const lines = [];
   let okAny = false;
-  let hardFail = false; // true if a required task failed (not skip)
+  let hardFail = false;
+  const isVip = !!store.isVip;
+  const vipSkipped = []; // VIP-only tasks skipped for non-VIP (single footer line)
 
   if (!hasCookie) {
-    lines.push(
-      "提示: 无 Cookie/SESSDATA，大积分/分享等 Web 接口无法鉴权"
-    );
+    lines.push("提示: 无 Cookie/SESSDATA，部分 Web 接口无法鉴权");
     hardFail = true;
   }
 
-  // 1) 直播签到已下线（code=1 签到活动已下线）— 已移除
-
-  // 2) 大会员大积分签到（新接口 sign2；旧 /score/task/sign 会 6007000/-663）
-  // 实测成功：POST /pgc/activity/score/task/sign2?csrf=...  JSON body {device,t,ts}
-  // Referer: big.bilibili.com；Cookie 仅 SESSDATA 体系，不要混裸 access_key
-  try {
-    const isVip = !!store.isVip;
-    if (!isVip) {
-      lines.push("大积分签到: 跳过（非大会员）");
-    } else if (!cookie || !cookie.includes("SESSDATA")) {
-      lines.push("大积分签到: 跳过（无 Cookie/SESSDATA）");
-      hardFail = true;
-    } else if (!csrf) {
-      lines.push("大积分签到: 跳过（无 bili_jct/csrf）");
-      hardFail = true;
-    } else {
-      // 先查三天签状态（可选）
-      let already = false;
-      try {
-        const info = await http(
-          "GET",
-          "https://api.bilibili.com/x/vip/vip_center/sign_in/three_days_sign?csrf=" +
-            encodeURIComponent(csrf),
-          webHeaders(store, "https://big.bilibili.com/mobile/bigPoint/task"),
-          null,
-          8
-        );
-        const ji = JSON.parse(info.data || "{}");
-        if (ji.code === 0 && ji.data && ji.data.three_day_sign && ji.data.three_day_sign.signed) {
-          already = true;
-          okAny = true;
-          lines.push("大积分签到: 今日已签（three_day_sign）");
-        }
-      } catch (e) {
-        log("three_day_sign info err", e);
-      }
-
-      if (!already) {
-        const headers = webHeaders(store, "https://big.bilibili.com/mobile/bigPoint/task");
-        headers["Content-Type"] = "application/json;charset=UTF-8";
-        headers.Origin = "https://big.bilibili.com";
-        headers.Referer = "https://big.bilibili.com/mobile/bigPoint/task";
-        // 关键：不要附带 access_key（会把有效 Cookie 鉴权打成 -663）
-        const tMs = Date.now();
-        const bodyObj = { device: "phone", t: tMs, ts: Math.floor(tMs / 1000) };
-        const url =
-          "https://api.bilibili.com/pgc/activity/score/task/sign2?csrf=" +
-          encodeURIComponent(csrf);
-        const r = await http("POST", url, headers, JSON.stringify(bodyObj), 10);
-        let j = {};
-        try {
-          j = JSON.parse(r.data || "{}");
-        } catch (e) {
-          j = {};
-        }
-        const msg = String(j.message || j.msg || "");
-        if (j.code === 0) {
-          okAny = true;
-          const d = j.data || {};
-          lines.push(
-            "大积分签到: 成功" +
-              (d.count != null ? " count=" + d.count : "")
-          );
-        } else if (
-          /已签|重复|already|今日已|签到过|已完成/i.test(msg) ||
-          j.code === 71000 ||
-          j.code === 6000002
-        ) {
-          okAny = true;
-          lines.push("大积分签到: 今日已签 (" + (j.code != null ? j.code : "") + ")");
-        } else if (
-          j.code === 6007000 &&
-          /已签|重复|今日|刷新重试|请勿重复/i.test(msg)
-        ) {
-          // 并发双跑时后发的常返回 6007000「请刷新重试」——若已有成功态则当已签
-          const stNow = dayState(store, day);
-          if (stNow.ok || /已签|重复|今日/i.test(msg)) {
-            okAny = true;
-            lines.push("大积分签到: 今日已签/并发重复 (" + j.code + " " + msg + ")");
-          } else {
-            hardFail = true;
-            lines.push("大积分签到: 失败 code=" + j.code + " " + msg);
-            log("bigpoint sign2 raw", String(r.data || "").slice(0, 200));
-          }
-        } else if (j.code === -663) {
-          hardFail = true;
-          lines.push(
-            "大积分签到: 失败 code=-663 鉴权失败（请确认 Cookie 完整含 SESSDATA+bili_jct，且未混入 access_key）"
-          );
-          log("bigpoint sign2 raw", String(r.data || "").slice(0, 200));
-        } else {
-          hardFail = true;
-          lines.push(
-            "大积分签到: 失败 code=" +
-              (j.code != null ? j.code : r.status) +
-              " " +
-              msg
-          );
-          log("bigpoint sign2 raw", String(r.data || "").slice(0, 200));
-        }
-      }
-    }
-  } catch (e) {
-    hardFail = true;
-    lines.push("大积分签到: 异常 " + e);
-  }
-
-  // 3) 经验任务：查询 + 尝试自动分享（share/add）
-  // 分享: POST https://api.bilibili.com/x/web-interface/share/add  body: aid + csrf
-  // 先拉排行榜取一个 aid（无需登录）
+  // ========== 主任务（不要求大会员）：经验分享 ==========
+  // 分享: POST https://api.bilibili.com/x/web-interface/share/add
   try {
     let exp = null;
     const r0 = await http(
@@ -1133,17 +1025,15 @@ async function doCheckin(opts, flags) {
 
     if (exp && exp.share) {
       lines.push(
-        "经验任务: 登录" +
+        "经验分享: 已完成；登录" +
           (exp.login ? "✓" : "✗") +
           " 观看" +
           (exp.watch ? "✓" : "✗") +
-          " 分享✓ 投币" +
-          (exp.coins || 0) +
-          "（分享已完成）"
+          " 投币" +
+          (exp.coins || 0)
       );
-      // 仅登录/观看不能算签到成功（否则失败后被 lastRunOk 卡住）
+      okAny = true;
     } else if (exp && cookie && csrf) {
-      // auto share
       let aid = null;
       try {
         const rr = await http(
@@ -1164,13 +1054,10 @@ async function doCheckin(opts, flags) {
       }
       if (!aid) {
         lines.push(
-          "经验任务: 登录" +
+          "经验分享: 跳过（未取到 aid）；登录" +
             (exp.login ? "✓" : "✗") +
             " 观看" +
-            (exp.watch ? "✓" : "✗") +
-            " 分享✗ 投币" +
-            (exp.coins || 0) +
-            "（未取到 aid，分享跳过）"
+            (exp.watch ? "✓" : "✗")
         );
       } else {
         const sh = webHeaders(store, "https://www.bilibili.com/video/");
@@ -1191,30 +1078,27 @@ async function doCheckin(opts, flags) {
         try {
           js = JSON.parse(rs.data || "{}");
         } catch (e) {}
-        // 0 ok; 71000 already shared etc.
-        if (js.code === 0 || js.code === 71000 || /已分享|重复/i.test(String(js.message || ""))) {
+        if (
+          js.code === 0 ||
+          js.code === 71000 ||
+          /已分享|重复/i.test(String(js.message || ""))
+        ) {
           okAny = true;
           lines.push(
-            "经验任务: 分享成功 aid=" +
+            "经验分享: 成功 aid=" +
               aid +
               "；登录" +
               (exp.login ? "✓" : "✗") +
               " 观看" +
-              (exp.watch ? "✓" : "✗") +
-              " 投币" +
-              (exp.coins || 0)
+              (exp.watch ? "✓" : "✗")
           );
         } else {
           hardFail = true;
           lines.push(
-            "经验任务: 分享失败 code=" +
+            "经验分享: 失败 code=" +
               js.code +
               " " +
-              (js.message || js.msg || "") +
-              "；登录" +
-              (exp.login ? "✓" : "✗") +
-              " 观看" +
-              (exp.watch ? "✓" : "✗")
+              (js.message || js.msg || "")
           );
         }
       }
@@ -1231,37 +1115,10 @@ async function doCheckin(opts, flags) {
       );
     }
   } catch (e) {
-    lines.push("经验任务: 异常 " + e);
+    lines.push("经验分享: 异常 " + e);
   }
 
-  // 4) VIP privilege receive - ignore already claimed
-  if (csrf && cookie) {
-    try {
-      const body = "type=1&csrf=" + encodeURIComponent(csrf);
-      const headers = webHeaders(store, "https://account.bilibili.com/");
-      headers["Content-Type"] = "application/x-www-form-urlencoded";
-      const r = await http(
-        "POST",
-        "https://api.bilibili.com/x/vip/privilege/receive",
-        headers,
-        body,
-        8
-      );
-      const j = JSON.parse(r.data || "{}");
-      if (j.code === 0) {
-        okAny = true;
-        lines.push("大会员福利: 领取成功");
-      } else if (/已领取|已经领取|领取过/i.test(String(j.message || j.msg || ""))) {
-        lines.push("大会员福利: 已领取过（忽略）");
-      } else {
-        lines.push("大会员福利: " + (j.message || j.msg || j.code));
-      }
-    } catch (e) {
-      lines.push("大会员福利: 异常 " + e);
-    }
-  }
-
-  // 5) silver2coin optional
+  // ========== 可选：银瓜子换硬币（不强制大会员）==========
   if (opts.银瓜子换硬币 && csrf && cookie) {
     try {
       const body =
@@ -1290,19 +1147,269 @@ async function doCheckin(opts, flags) {
     }
   }
 
+  // ========== 大会员任务 ==========
+  if (!isVip) {
+    vipSkipped.push("大积分签到", "等级加速包", "大会员卡券");
+    lines.push("大会员任务已跳过");
+  } else {
+    // 2) 大积分签到 sign2
+    try {
+      if (!cookie || !cookie.includes("SESSDATA")) {
+        lines.push("大积分签到: 跳过（无 Cookie/SESSDATA）");
+        hardFail = true;
+      } else if (!csrf) {
+        lines.push("大积分签到: 跳过（无 bili_jct/csrf）");
+        hardFail = true;
+      } else {
+        let already = false;
+        try {
+          const info = await http(
+            "GET",
+            "https://api.bilibili.com/x/vip/vip_center/sign_in/three_days_sign?csrf=" +
+              encodeURIComponent(csrf),
+            webHeaders(store, "https://big.bilibili.com/mobile/bigPoint/task"),
+            null,
+            8
+          );
+          const ji = JSON.parse(info.data || "{}");
+          if (
+            ji.code === 0 &&
+            ji.data &&
+            ji.data.three_day_sign &&
+            ji.data.three_day_sign.signed
+          ) {
+            already = true;
+            okAny = true;
+            lines.push("大积分签到: 今日已签");
+          }
+        } catch (e) {
+          log("three_day_sign info err", e);
+        }
+        if (!already) {
+          const headers = webHeaders(
+            store,
+            "https://big.bilibili.com/mobile/bigPoint/task"
+          );
+          headers["Content-Type"] = "application/json;charset=UTF-8";
+          headers.Origin = "https://big.bilibili.com";
+          headers.Referer = "https://big.bilibili.com/mobile/bigPoint/task";
+          const tMs = Date.now();
+          const bodyObj = {
+            device: "phone",
+            t: tMs,
+            ts: Math.floor(tMs / 1000),
+          };
+          const url =
+            "https://api.bilibili.com/pgc/activity/score/task/sign2?csrf=" +
+            encodeURIComponent(csrf);
+          const r = await http(
+            "POST",
+            url,
+            headers,
+            JSON.stringify(bodyObj),
+            10
+          );
+          let j = {};
+          try {
+            j = JSON.parse(r.data || "{}");
+          } catch (e) {
+            j = {};
+          }
+          const msg = String(j.message || j.msg || "");
+          if (j.code === 0) {
+            okAny = true;
+            lines.push(
+              "大积分签到: 成功" +
+                (j.data && j.data.count != null ? " count=" + j.data.count : "")
+            );
+          } else if (
+            /已签|重复|already|今日已|签到过|已完成/i.test(msg) ||
+            j.code === 71000 ||
+            j.code === 6000002
+          ) {
+            okAny = true;
+            lines.push("大积分签到: 今日已签 (" + j.code + ")");
+          } else if (
+            j.code === 6007000 &&
+            /已签|重复|今日|刷新重试|请勿重复/i.test(msg)
+          ) {
+            const stNow = dayState(store, day);
+            if (stNow.ok || /已签|重复|今日/i.test(msg)) {
+              okAny = true;
+              lines.push("大积分签到: 今日已签/并发重复");
+            } else {
+              hardFail = true;
+              lines.push("大积分签到: 失败 code=" + j.code + " " + msg);
+            }
+          } else if (j.code === -663) {
+            hardFail = true;
+            lines.push("大积分签到: 失败 code=-663 鉴权失败");
+          } else {
+            hardFail = true;
+            lines.push(
+              "大积分签到: 失败 code=" +
+                (j.code != null ? j.code : r.status) +
+                " " +
+                msg
+            );
+          }
+        }
+      }
+    } catch (e) {
+      hardFail = true;
+      lines.push("大积分签到: 异常 " + e);
+    }
+
+    // 3) 专属等级加速包（每日约 +10 经验）
+    // App/社区实现：GET /x/vip/privilege/my → type=9 状态
+    //   state 0 未领 → POST /x/vip/experience/add  csrf=...
+    //   state 1 已领
+    //   state 2 需先观看视频约 1 分钟
+    // IPA 字符串含 vip_privilege；接口实测 type=9 存在；experience/add 可领取
+    try {
+      if (!cookie || !csrf) {
+        lines.push("等级加速包: 跳过（无 Cookie/csrf）");
+      } else {
+        let state = null;
+        try {
+          const pr = await http(
+            "GET",
+            "https://api.bilibili.com/x/vip/privilege/my",
+            webHeaders(store, "https://account.bilibili.com/account/big"),
+            null,
+            8
+          );
+          const pj = JSON.parse(pr.data || "{}");
+          if (pj.code === 0 && pj.data && Array.isArray(pj.data.list)) {
+            const item = pj.data.list.find(function (x) {
+              return x && Number(x.type) === 9;
+            });
+            if (item) state = item.state;
+            log("vip privilege type9 state", state, item || null);
+          }
+        } catch (e) {
+          log("privilege/my err", e);
+        }
+
+        if (state === 1) {
+          lines.push("等级加速包: 今日已领取");
+          okAny = true;
+        } else if (state === 2) {
+          lines.push("等级加速包: 需先观看视频约1分钟后再领（未完成）");
+          // 不记 hardFail：依赖真实观看，非脚本故障
+        } else {
+          // state 0 / unknown：尝试领取
+          const headers = webHeaders(
+            store,
+            "https://account.bilibili.com/account/big"
+          );
+          headers["Content-Type"] = "application/x-www-form-urlencoded";
+          // 与 BiliBiliToolPro ObtainVipExperience 一致：csrf；附带 type=9 兼容
+          const body =
+            "csrf=" +
+            encodeURIComponent(csrf) +
+            "&type=9";
+          const r = await http(
+            "POST",
+            "https://api.bilibili.com/x/vip/experience/add",
+            headers,
+            body,
+            10
+          );
+          let j = {};
+          try {
+            j = JSON.parse(r.data || "{}");
+          } catch (e) {
+            j = {};
+          }
+          const msg = String(j.message || j.msg || "");
+          if (j.code === 0) {
+            okAny = true;
+            const granted =
+              j.data && (j.data.is_grant === true || j.data.is_grant === 1);
+            lines.push(
+              "等级加速包: 领取成功" + (granted ? "（+经验）" : "")
+            );
+          } else if (
+            /已领取|已经领取|领取过|已兑换/i.test(msg) ||
+            j.code === 69198 ||
+            j.code === 69801
+          ) {
+            okAny = true;
+            lines.push("等级加速包: 已领取过");
+          } else if (
+            /观看|未完成|先看|1分钟|一分钟/i.test(msg) ||
+            j.code === 69819 ||
+            state === 2
+          ) {
+            lines.push(
+              "等级加速包: 需先观看视频约1分钟 code=" +
+                (j.code != null ? j.code : "") +
+                " " +
+                msg
+            );
+          } else {
+            hardFail = true;
+            lines.push(
+              "等级加速包: 失败 code=" +
+                (j.code != null ? j.code : r.status) +
+                " " +
+                msg
+            );
+            log("experience/add raw", String(r.data || "").slice(0, 200));
+          }
+        }
+      }
+    } catch (e) {
+      hardFail = true;
+      lines.push("等级加速包: 异常 " + e);
+    }
+
+    // 4) 大会员卡券 type=1（B币券等，已领忽略）
+    if (csrf && cookie) {
+      try {
+        const body = "type=1&csrf=" + encodeURIComponent(csrf);
+        const headers = webHeaders(store, "https://account.bilibili.com/");
+        headers["Content-Type"] = "application/x-www-form-urlencoded";
+        const r = await http(
+          "POST",
+          "https://api.bilibili.com/x/vip/privilege/receive",
+          headers,
+          body,
+          8
+        );
+        const j = JSON.parse(r.data || "{}");
+        if (j.code === 0) {
+          okAny = true;
+          lines.push("大会员卡券: 领取成功");
+        } else if (/已领取|已经领取|领取过/i.test(String(j.message || j.msg || ""))) {
+          lines.push("大会员卡券: 已领取过（忽略）");
+        } else {
+          lines.push(
+            "大会员卡券: " + (j.message || j.msg || j.code)
+          );
+        }
+      } catch (e) {
+        lines.push("大会员卡券: 异常 " + e);
+      }
+    }
+  }
+
   // ---- 汇总：成功键 dayState.ok；失败记 pending + 退避 ----
   // 解析 lines 粗分 pending 项（大积分/分享）
   const pending = [];
   const textAll = lines.join("\n");
   // 已成功/已签 不算失败项
   const bigpointFailed =
-    /大积分签到: 失败|大积分签到: 异常|大积分签到: 跳过（无 Cookie/i.test(textAll) &&
+    /大积分签到: 失败|大积分签到: 异常/i.test(textAll) &&
     !/大积分签到: 成功|大积分签到: 今日已签/i.test(textAll);
-  if (bigpointFailed) {
-    pending.push("bigpoint");
-  }
-  if (/经验任务: 分享失败|经验任务:.*分享✗|经验任务: 异常/i.test(textAll)) {
-    pending.push("share");
+  if (bigpointFailed) pending.push("bigpoint");
+  if (/经验分享: 失败|经验分享: 异常/i.test(textAll)) pending.push("share");
+  if (
+    /等级加速包: 失败|等级加速包: 异常/i.test(textAll) &&
+    !/等级加速包: 领取成功|等级加速包: 已领取|等级加速包: 今日已领取/i.test(textAll)
+  ) {
+    pending.push("exp_pack");
   }
   // 无 Cookie 时两项都可能挂
   if (/无 Cookie\/SESSDATA/i.test(textAll) && pending.indexOf("bigpoint") < 0) {
@@ -1312,7 +1419,8 @@ async function doCheckin(opts, flags) {
   // 成功定义：大积分成功/已签，或分享成功，或银瓜子成功；仅登录/观看/已领福利不算整天成功
   const realOk =
     /大积分签到: 成功|大积分签到: 今日已签/i.test(textAll) ||
-    /经验任务: 分享成功|经验任务:.*分享✓|分享已完成/i.test(textAll) ||
+    /经验分享: 成功|经验分享: 已完成/i.test(textAll) ||
+    /等级加速包: 领取成功|等级加速包: 已领取|等级加速包: 今日已领取/i.test(textAll) ||
     /银瓜子换硬币: 成功/i.test(textAll) ||
     (!!okAny && pending.length === 0 && !hardFail);
 

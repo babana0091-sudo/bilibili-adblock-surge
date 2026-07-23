@@ -103,7 +103,9 @@ INSTALL.md
 根因：`DOMAIN,cm.bilibili.com,REJECT` 整域拒绝太狠。  
 评论半屏广告组件会访问该域，整域拒绝时 UI 可能一直等。
 
-### 当前版本：v1.1.6（cm 不做 MITM）
+### 当前版本：v1.1.7（还原 1.1.4/1.1.2）
+> 用户确认详情卡顿不是 cm MITM 问题后，已还原到 1.1.4/1.1.2 行为，仅升版本号到 1.1.7 便于更新。
+
 
 - **取消** `DOMAIN,cm.bilibili.com,REJECT`
 - **不**对 cm 做 Map Local 空返回（1.1.3 已回退；版本号升到 1.1.4 方便 Surge 直接更新）

@@ -67,11 +67,37 @@ function notify(title, sub, body) {
 function readStore() {
   try {
     const raw = $persistentStore.read(STORE_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw);
-  } catch (e) {
-    return {};
-  }
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  // 首次用 v2 键：从旧键迁移 Cookie/token，不迁移 lastRunOk/day 成功态（相当于可重新签）
+  try {
+    const oldRaw = $persistentStore.read("bili_adblock_checkin");
+    if (oldRaw) {
+      const old = JSON.parse(oldRaw);
+      const mig = {};
+      for (const k of [
+        "cookie",
+        "csrf",
+        "uid",
+        "bili_app_token",
+        "app_query_snap",
+        "isVip",
+        "vipDetail",
+        "vipCheckedAt",
+        "cookieCaptureFrom",
+        "cookieCaptureUrl",
+        "authorization",
+      ]) {
+        if (old[k] != null) mig[k] = old[k];
+      }
+      try {
+        $persistentStore.write(JSON.stringify(mig), STORE_KEY);
+      } catch (e) {}
+      log("migrated session from old store key (day success NOT migrated)");
+      return mig;
+    }
+  } catch (e) {}
+  return {};
 }
 
 function writeStore(obj) {

@@ -6,7 +6,7 @@
 // Storage: bili_adblock_checkin_v2
 
 const STORE_KEY = "bili_adblock_checkin_v2"; // v2: 换键丢弃旧 lastRunOk，避免误标成功导致不再签
-const SCRIPT_VERSION = "2.0.9";
+const SCRIPT_VERSION = "2.0.10";
 const NAME = "哔哩签到";
 
 function parseArgs(raw) {
@@ -885,78 +885,90 @@ async function doCheckin(opts, flags) {
 
   // 1) 直播签到已下线（code=1 签到活动已下线）— 已移除
 
-  // 2) 大会员大积分签到
-  // POST https://api.bilibili.com/pgc/activity/score/task/sign
-  // 文档: Cookie(SESSDATA 需 URL 编码) + Referer *.bilibili.com + csrf；APP 可用 access_key
-  // App 页面: big.bilibili.com/mobile/bigPoint
+  // 2) 大会员大积分签到（新接口 sign2；旧 /score/task/sign 会 6007000/-663）
+  // 实测成功：POST /pgc/activity/score/task/sign2?csrf=...  JSON body {device,t,ts}
+  // Referer: big.bilibili.com；Cookie 仅 SESSDATA 体系，不要混裸 access_key
   try {
-    if (!store.isVip && store.isVip !== true) {
-      // re-read: isVip may be from detect above
-    }
     const isVip = !!store.isVip;
     if (!isVip) {
       lines.push("大积分签到: 跳过（非大会员）");
     } else if (!cookie || !cookie.includes("SESSDATA")) {
       lines.push("大积分签到: 跳过（无 Cookie/SESSDATA）");
       hardFail = true;
+    } else if (!csrf) {
+      lines.push("大积分签到: 跳过（无 bili_jct/csrf）");
+      hardFail = true;
     } else {
-      const headers = webHeaders(store, "https://big.bilibili.com/mobile/bigPoint/task");
-      headers["Content-Type"] = "application/x-www-form-urlencoded";
-      headers.Origin = "https://big.bilibili.com";
-      headers.Referer = "https://big.bilibili.com/mobile/bigPoint/task";
-      let body = "";
-      if (csrf) body = "csrf=" + encodeURIComponent(csrf) + "&csrf_token=" + encodeURIComponent(csrf);
-      // APP 方式可附带 access_key（文档）；有则带上
-      if (accessKey) {
-        body = (body ? body + "&" : "") + "access_key=" + encodeURIComponent(accessKey);
-      }
-      const r = await http(
-        "POST",
-        "https://api.bilibili.com/pgc/activity/score/task/sign",
-        headers,
-        body || "csrf=",
-        8
-      );
-      let j = {};
+      // 先查三天签状态（可选）
+      let already = false;
       try {
-        j = JSON.parse(r.data || "{}");
+        const info = await http(
+          "GET",
+          "https://api.bilibili.com/x/vip/vip_center/sign_in/three_days_sign?csrf=" +
+            encodeURIComponent(csrf),
+          webHeaders(store, "https://big.bilibili.com/mobile/bigPoint/task"),
+          null,
+          8
+        );
+        const ji = JSON.parse(info.data || "{}");
+        if (ji.code === 0 && ji.data && ji.data.three_day_sign && ji.data.three_day_sign.signed) {
+          already = true;
+          okAny = true;
+          lines.push("大积分签到: 今日已签（three_day_sign）");
+        }
       } catch (e) {
-        j = {};
+        log("three_day_sign info err", e);
       }
-      const msg = String(j.message || j.msg || "");
-      if (j.code === 0) {
-        okAny = true;
-        lines.push("大积分签到: 成功");
-      } else if (
-        /已签|重复|already|今日已|签到过|已完成/i.test(msg) ||
-        j.code === 71000 ||
-        j.code === 6000002 ||
-        j.code === 710001
-      ) {
-        okAny = true;
-        lines.push("大积分签到: 今日已签 (" + (j.code != null ? j.code : "") + ")");
-      } else if (
-        j.code === -403 ||
-        j.code === 6001001 ||
-        /非大会员|不是大会员|权限不足|未开通/i.test(msg)
-      ) {
-        lines.push("大积分签到: 非会员/无权限，跳过");
-      } else if (j.code === 6007000) {
-        // 常见：参数/Referer/Cookie 编码问题
-        hardFail = true;
-        lines.push(
-          "大积分签到: 失败 code=6007000 请求错误（检查 Cookie 编码/Referer/csrf；与 App big.bilibili.com 不一致时常见）"
-        );
-        log("bigpoint raw", String(r.data || "").slice(0, 200));
-      } else {
-        hardFail = true;
-        lines.push(
-          "大积分签到: 失败 code=" +
-            (j.code != null ? j.code : r.status) +
-            " " +
-            msg
-        );
-        log("bigpoint raw", String(r.data || "").slice(0, 200));
+
+      if (!already) {
+        const headers = webHeaders(store, "https://big.bilibili.com/mobile/bigPoint/task");
+        headers["Content-Type"] = "application/json;charset=UTF-8";
+        headers.Origin = "https://big.bilibili.com";
+        headers.Referer = "https://big.bilibili.com/mobile/bigPoint/task";
+        // 关键：不要附带 access_key（会把有效 Cookie 鉴权打成 -663）
+        const tMs = Date.now();
+        const bodyObj = { device: "phone", t: tMs, ts: Math.floor(tMs / 1000) };
+        const url =
+          "https://api.bilibili.com/pgc/activity/score/task/sign2?csrf=" +
+          encodeURIComponent(csrf);
+        const r = await http("POST", url, headers, JSON.stringify(bodyObj), 10);
+        let j = {};
+        try {
+          j = JSON.parse(r.data || "{}");
+        } catch (e) {
+          j = {};
+        }
+        const msg = String(j.message || j.msg || "");
+        if (j.code === 0) {
+          okAny = true;
+          const d = j.data || {};
+          lines.push(
+            "大积分签到: 成功" +
+              (d.count != null ? " count=" + d.count : "")
+          );
+        } else if (
+          /已签|重复|already|今日已|签到过|已完成/i.test(msg) ||
+          j.code === 71000 ||
+          j.code === 6000002
+        ) {
+          okAny = true;
+          lines.push("大积分签到: 今日已签 (" + (j.code != null ? j.code : "") + ")");
+        } else if (j.code === -663) {
+          hardFail = true;
+          lines.push(
+            "大积分签到: 失败 code=-663 鉴权失败（请确认 Cookie 完整含 SESSDATA+bili_jct，且未混入 access_key）"
+          );
+          log("bigpoint sign2 raw", String(r.data || "").slice(0, 200));
+        } else {
+          hardFail = true;
+          lines.push(
+            "大积分签到: 失败 code=" +
+              (j.code != null ? j.code : r.status) +
+              " " +
+              msg
+          );
+          log("bigpoint sign2 raw", String(r.data || "").slice(0, 200));
+        }
       }
     }
   } catch (e) {

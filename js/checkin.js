@@ -415,18 +415,29 @@ async function captureCookie(opts) {
   let gotToken = false;
   let tokenFromReq = "";
 
-  if (cookie && cookie.includes("SESSDATA")) {
-    gotCookie = true;
-    if (store.cookie !== cookie) {
+  // Web/App mixed: some hosts send full Cookie (SESSDATA); app.bilibili.com often does not
+  if (cookie && (cookie.includes("SESSDATA") || cookie.includes("DedeUserID"))) {
+    gotCookie = !!(cookie.includes("SESSDATA"));
+    if (cookie.includes("SESSDATA") && store.cookie !== cookie) {
+      store.cookie = cookie;
+      store.cookieUpdatedAt = new Date().toISOString();
+      sessionChanged = true;
+    } else if (cookie.includes("SESSDATA") && !store.cookie) {
       store.cookie = cookie;
       store.cookieUpdatedAt = new Date().toISOString();
       sessionChanged = true;
     }
     const m = cookieMap(cookie);
     if (m.bili_jct) store.csrf = m.bili_jct;
-    if (m.DedeUserID && store.uid !== m.DedeUserID) {
-      store.uid = m.DedeUserID;
+    if (m.DedeUserID && store.uid !== String(m.DedeUserID)) {
+      store.uid = String(m.DedeUserID);
+      if (gotCookie) sessionChanged = true;
+    }
+    // Merge SESSDATA-bearing cookie pieces if store empty
+    if (!store.cookie && m.SESSDATA) {
+      store.cookie = cookie;
       sessionChanged = true;
+      gotCookie = true;
     }
   }
 
@@ -441,6 +452,31 @@ async function captureCookie(opts) {
         store.bili_app_token = ak;
         store.biliAppTokenUpdatedAt = new Date().toISOString();
         sessionChanged = true;
+      }
+    }
+  } catch (e) {}
+
+  // Snapshot App signed-query companions (for diagnostics / future app-signed APIs)
+  try {
+    const u = new URL(url);
+    if (u.searchParams.get("access_key") || u.searchParams.get("appkey")) {
+      const snap = {};
+      for (const k of [
+        "appkey",
+        "mobi_app",
+        "platform",
+        "build",
+        "device",
+        "ts",
+        "actionKey",
+        "statistics",
+      ]) {
+        const v = u.searchParams.get(k);
+        if (v) snap[k] = v;
+      }
+      if (Object.keys(snap).length) {
+        store.app_query_snap = snap;
+        store.appQuerySnapAt = new Date().toISOString();
       }
     }
   } catch (e) {}
@@ -592,7 +628,7 @@ async function doCheckin(opts) {
       notify(
         NAME,
         "未捕获登录态",
-        "App 请求常无 Cookie，请打开 B 站首页一次以抓取 access_key；或登录态失效请重新登录"
+        "请打开 B 站并浏览一下（含直播/动态等），以便抓取 Cookie(SESSDATA)。仅 access_key 无法完成 Web 签到（会 -663）"
       );
     } else {
       log("no session, notify throttled");
@@ -606,6 +642,11 @@ async function doCheckin(opts) {
     return;
   }
 
+  log(
+    "auth mode",
+    hasCookie ? "cookie+SESSDATA" : "access_key-only",
+    "token=" + (hasAK ? "yes" : "no")
+  );
   // Session 存在 + cron 拉起：会员检测（仅日志，节流）— 不在 http-request 路径
   try {
     await probeVipIfSession(opts, "cron-start", false);
@@ -666,91 +707,112 @@ async function doCheckin(opts) {
   store.vipDetail = vip.detail || "";
   writeStore(store);
   log("vip detect:", vip.isVip ? "YES" : "NO", vip.detail || "");
-  if (!vip.isVip) {
-    log("skip checkin: not VIP (no notification)");
-    $done({});
-    return;
-  }
+  // 直播签到不要求大会员；大积分才要求。无 Cookie 时下面各任务会明确跳过/失败说明。
 
   const lines = [];
   let okAny = false;
+  if (!hasCookie) {
+    lines.push(
+      "提示: 当前只有 access_key、无 Cookie。App 请求带 appkey+sign，Web 签到接口需要 SESSDATA，故易出现 -663"
+    );
+  }
 
-  // 1) Live sign
+  // 1) Live sign — Web API DoSign expects Cookie(SESSDATA).
+  // Bare access_key without appkey+sign → often code=-663 鉴权失败 (App 鉴权不完整).
   try {
-    let signUrl =
-      "https://api.live.bilibili.com/xlive/web-ucenter/v1/sign/DoSign";
-    if (accessKey) {
-      signUrl +=
-        (signUrl.indexOf("?") >= 0 ? "&" : "?") +
-        "access_key=" +
-        encodeURIComponent(accessKey);
-    }
-    const r = await http("GET", signUrl, baseHeaders);
-    const j = JSON.parse(r.data || "{}");
-    if (j.code === 0) {
-      okAny = true;
-      const d = j.data || {};
+    if (!cookie || !cookie.includes("SESSDATA")) {
       lines.push(
-        `直播签到: 成功 (${d.hadSignDays || "?"}/${d.allDays || "?"}天) ${
-          d.text || ""
-        }`
+        "直播签到: 跳过（无 Cookie/SESSDATA；仅 access_key 调 Web 接口会 -663 鉴权失败）"
       );
-    } else if (j.code === 1011040) {
-      okAny = true;
-      lines.push("直播签到: 今日已签");
+      log("live sign skip: need SESSDATA cookie; app uses access_key+appkey+sign");
     } else {
-      lines.push(`直播签到: 失败 code=${j.code} ${j.message || j.msg || ""}`);
+      const signUrl =
+        "https://api.live.bilibili.com/xlive/web-ucenter/v1/sign/DoSign";
+      const r = await http("GET", signUrl, baseHeaders);
+      const j = JSON.parse(r.data || "{}");
+      if (j.code === 0) {
+        okAny = true;
+        const d = j.data || {};
+        lines.push(
+          `直播签到: 成功 (${d.hadSignDays || "?"}/${d.allDays || "?"}天) ${
+            d.text || ""
+          }`
+        );
+      } else if (j.code === 1011040) {
+        okAny = true;
+        lines.push("直播签到: 今日已签");
+      } else if (j.code === -663 || j.code === -101) {
+        lines.push(
+          `直播签到: 失败 code=${j.code} ${j.message || j.msg || ""}（登录态无效或缺少 Cookie）`
+        );
+      } else {
+        lines.push(`直播签到: 失败 code=${j.code} ${j.message || j.msg || ""}`);
+      }
     }
   } catch (e) {
     lines.push("直播签到: 异常 " + e);
   }
 
-  // 2) VIP 大积分签到（大会员；非会员会失败，忽略）
-  // POST https://api.bilibili.com/pgc/activity/score/task/sign
+    // 2) VIP 大积分签到 — Web POST，需要 Cookie + bili_jct(csrf)
+  // 裸 access_key 会 -663 鉴权失败
   try {
-    const headers = Object.assign({}, baseHeaders, {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Referer: "https://big.bilibili.com/",
-      Origin: "https://www.bilibili.com",
-    });
-    let body = "";
-    if (csrf) body = "csrf=" + encodeURIComponent(csrf);
-    if (store.bili_app_token) {
-      body = (body ? body + "&" : "") + "access_key=" + encodeURIComponent(store.bili_app_token);
-    }
-    const r = await http(
-      "POST",
-      "https://api.bilibili.com/pgc/activity/score/task/sign",
-      headers,
-      body
-    );
-    let j = {};
-    try {
-      j = JSON.parse(r.data || "{}");
-    } catch (e) {
-      j = {};
-    }
-    // 0 success; common already-signed codes vary — treat message hints as ok
-    const msg = String(j.message || j.msg || "");
-    if (j.code === 0) {
-      okAny = true;
-      lines.push("大积分签到: 成功");
-    } else if (
-      /已签|重复|already|今日已|签到过/i.test(msg) ||
-      j.code === 71000 ||
-      j.code === 6000002
-    ) {
-      okAny = true;
-      lines.push("大积分签到: 今日已签 (" + (j.code != null ? j.code : "") + ")");
-    } else if (j.code === -403 || j.code === 6001001 || /非大会员|不是大会员|权限不足|未开通/i.test(msg)) {
-      lines.push("大积分签到: 非会员/无权限，跳过");
+    if (!store.isVip) {
+      lines.push("大积分签到: 跳过（非大会员）");
+    } else if (!cookie || !cookie.includes("SESSDATA")) {
+      lines.push("大积分签到: 跳过（无 Cookie/SESSDATA）");
     } else {
-      lines.push(
-        "大积分签到: 失败 code=" +
-          (j.code != null ? j.code : r.status) +
-          " " +
-          msg
+      const headers = Object.assign({}, baseHeaders, {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Referer: "https://big.bilibili.com/",
+        Origin: "https://www.bilibili.com",
+      });
+      let body = "";
+      if (csrf) body = "csrf=" + encodeURIComponent(csrf);
+      const r = await http(
+        "POST",
+        "https://api.bilibili.com/pgc/activity/score/task/sign",
+        headers,
+        body
       );
+      let j = {};
+      try {
+        j = JSON.parse(r.data || "{}");
+      } catch (e) {
+        j = {};
+      }
+      const msg = String(j.message || j.msg || "");
+      if (j.code === 0) {
+        okAny = true;
+        lines.push("大积分签到: 成功");
+      } else if (
+        /已签|重复|already|今日已|签到过/i.test(msg) ||
+        j.code === 71000 ||
+        j.code === 6000002
+      ) {
+        okAny = true;
+        lines.push("大积分签到: 今日已签 (" + (j.code != null ? j.code : "") + ")");
+      } else if (
+        j.code === -403 ||
+        j.code === 6001001 ||
+        /非大会员|不是大会员|权限不足|未开通/i.test(msg)
+      ) {
+        lines.push("大积分签到: 非会员/无权限，跳过");
+      } else if (j.code === -663 || j.code === -101) {
+        lines.push(
+          "大积分签到: 失败 code=" +
+            j.code +
+            " " +
+            msg +
+            "（登录态无效或缺少 Cookie）"
+        );
+      } else {
+        lines.push(
+          "大积分签到: 失败 code=" +
+            (j.code != null ? j.code : r.status) +
+            " " +
+            msg
+        );
+      }
     }
   } catch (e) {
     lines.push("大积分签到: 异常 " + e);

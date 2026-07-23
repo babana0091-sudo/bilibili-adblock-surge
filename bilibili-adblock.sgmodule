@@ -1,9 +1,9 @@
 #!name=哔哩哔哩去广告（融合增强）
-#!desc=Surge 纯网络 MITM：B 站广告屏蔽 + 可选自动签到。v2.0.4
+#!desc=Surge 纯网络 MITM：B 站广告屏蔽 + 可选自动签到。v2.0.5
 #!author=babana0091-sudo
 #!homepage=https://github.com/babana0091-sudo/bilibili-adblock-surge
 #!category=去广告
-#!version=2.0.4
+#!version=2.0.5
 #!arguments=ad_normal:true,ad_pause:true,ad_game:true,ad_drama:true,checkin:true,silver2coin:false,block_risk:false,debug:false
 #!arguments-desc=ad_normal(常规广告): 开屏/推荐/信息流等\n默认 true\n\nad_pause(暂停广告): 暂停页商业卡\n默认 true\n\nad_game(小游戏广告)\n默认 true\n\nad_drama(短剧广告)\n默认 true\n\ncheckin(自动签到)\n默认 true\n\nsilver2coin(银瓜子换硬币)\n默认 false\n\nblock_risk(拦截Gaia风控上报)\n默认 false\n\ndebug(调试日志)\n默认 false
 
@@ -13,7 +13,7 @@ URL-REGEX,"^http:\/\/[\d\.]+:8000\/v1\/resource\/\w{32}-1-SPLASH",REJECT-TINYGIF
 
 [Script]
 # 可开关广告空返回（ad_normal/ad_game=false 时放行）
-bili-ad-map = type=http-request,pattern=^https?:\/\/(?:ap[ip]\.bilibili\.com\/x\/(?:resource\/(?:top\/activity|patch\/tab)|vip\/ads\/materials)|app\.bilibili\.com\/x\/(?:v2\/banner|resource\/deeplink\/ad)|api\.bilibili\.com\/(?:x\/v2\/dm\/ad|pgc\/activity\/deliver\/material\/receive)|manga\.bilibili\.com\/twirp\/comic\.v\d\.Comic\/(?:Flash|ListFlash)|api\.vc\.bilibili\.com\/(?:topic_svr\/v1\/topic_svr|dynamic_svr\/v1\/dynamic_svr\/mix_uplist)|api\.live\.bilibili\.com\/xlive\/(?:e-commerce-interface\/v1\/ecommerce-user\/get_shopping_info|app-ucenter\/v1\/ad\/adLiveGame\/getAdLiveGameMaterial)|line\d?-h5-mobile-api\.biligame\.com\/game\/center\/h5\/(?:small\/game\/(?:advertising_position|mini_game_exit_popup)|user\/smallgame\/iaa_ad_style_exp)|miniapp\.bilibili\.com\/open\/open_api\/v1\/miniapp\/(?:ad\/position\/query|client\/ad\/query)|game-attribute\.biligame\.com\/mini\/api\/clicK),script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/ad-map.js,requires-body=0,argument=ad_normal={{{ad_normal}}}&ad_game={{{ad_game}}}&debug={{{debug}}},script-update-interval=0
+bili-ad-map = type=http-request,pattern=^https?:\/\/(?:ap[ip]\.bilibili\.com\/x\/(?:resource\/(?:top\/activity)|vip\/ads\/materials)|app\.bilibili\.com\/x\/(?:v2\/banner|resource\/deeplink\/ad)|api\.bilibili\.com\/(?:x\/v2\/dm\/ad|pgc\/activity\/deliver\/material\/receive)|manga\.bilibili\.com\/twirp\/comic\.v\d\.Comic\/(?:Flash|ListFlash)|api\.vc\.bilibili\.com\/(?:topic_svr\/v1\/topic_svr|dynamic_svr\/v1\/dynamic_svr\/mix_uplist)|api\.live\.bilibili\.com\/xlive\/(?:e-commerce-interface\/v1\/ecommerce-user\/get_shopping_info|app-ucenter\/v1\/ad\/adLiveGame\/getAdLiveGameMaterial)|line\d?-h5-mobile-api\.biligame\.com\/game\/center\/h5\/(?:small\/game\/(?:advertising_position|mini_game_exit_popup)|user\/smallgame\/iaa_ad_style_exp)|miniapp\.bilibili\.com\/open\/open_api\/v1\/miniapp\/(?:ad\/position\/query|client\/ad\/query)|game-attribute\.biligame\.com\/mini\/api\/clicK),script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/ad-map.js,requires-body=0,argument=ad_normal={{{ad_normal}}}&ad_game={{{ad_game}}}&debug={{{debug}}},script-update-interval=0
 
 bili-json = type=http-response,pattern=^https?:\/\/(?:app|api)\.bili(?:bili\.com|api\.net)\/(?:x\/v2\/(?:splash\/(?:brand\/list|event\/list2|list|show)|feed\/index(?:\/story(?:\/(?:cart|refresh|trans))?)?|banner)|x\/web-interface\/wbi\/index\/top\/feed\/rcmd|pgc\/(?:page\/(?:bangumi|cinema\/tab)|view\/v2\/(?:app\/season|story\/season))|x\/vip\/ads\/materials),requires-body=1,max-size=-1,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/json-response.js,argument=ad_normal={{{ad_normal}}}&ad_pause={{{ad_pause}}}&ad_game={{{ad_game}}}&ad_drama={{{ad_drama}}}&debug={{{debug}}},script-update-interval=0
 bili-live-json = type=http-response,pattern=^https?:\/\/api\.live\.bilibili\.com\/xlive\/(?:app-room\/v1\/index\/getInfoByRoom|app-interface\/v2\/index\/feed|app-ucenter\/v1\/ad\/adLiveGame\/getAdLiveGameMaterial),requires-body=1,max-size=-1,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/json-response.js,argument=ad_normal={{{ad_normal}}}&ad_pause={{{ad_pause}}}&ad_game={{{ad_game}}}&ad_drama={{{ad_drama}}}&debug={{{debug}}},script-update-interval=0

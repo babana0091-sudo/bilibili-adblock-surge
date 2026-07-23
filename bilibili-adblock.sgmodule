@@ -1,22 +1,31 @@
 #!name=哔哩哔哩去广告（融合增强）
-#!desc=Surge 网络 MITM：常规/暂停/小游戏/短剧广告 + 可选自动签到。v1.1.8：取消 biliapi 整域 REJECT 与 DefaultWords 硬 reject，降低搜索偶发加载失败。
+#!desc=Surge 网络 MITM：常规/暂停/小游戏/短剧广告 + 可选自动签到。v1.1.9：拦截 Gaia 风控设备上报；搜索主链路不再空返回 square/recommend_words。
 #!author=babana0091-sudo
 #!homepage=https://github.com/babana0091-sudo/bilibili-adblock-surge
 #!category=去广告
-#!version=1.1.8
+#!version=1.1.9
 #!arguments=常规广告:true,暂停广告:true,小游戏广告:true,短剧广告:true,自动签到:true,银瓜子换硬币:false,调试日志:false
 #!arguments-desc=常规广告: 开屏、推荐 Banner、信息流、搜索、直播/番剧页等基础广告\n默认开启\n\n暂停广告: 播放暂停时的暂停页/框下商业卡（网络层可拦截部分）\n默认开启\n\n小游戏广告: 小游戏广告位、IAA、直播小游戏物料、游戏推广卡\n默认开启\n\n短剧广告: Story 竖屏流广告与短剧/playlet 推广\n默认开启\n\n自动签到: 打开 App 自动抓 Cookie，每天定时直播签到/查经验/尝试大会员福利\n默认开启\n\n银瓜子换硬币: 签到时是否尝试银瓜子换硬币\n默认关闭\n\n调试日志: 脚本调试日志\n默认关闭
 
 [Rule]
-# 不做 biliapi 整域 REJECT：搜索可能 fallback 到 api/app.biliapi.net，整域拒绝会造成偶发加载失败、重试后成功
-# 注意：不要 DOMAIN 整域 REJECT cm.bilibili.com
-# 短视频/评论广告组件可能依赖该域；整域拦截会导致评论半屏一直转圈
+# 本模块不含代理策略（不会把 B 站改走代理）；只有 REJECT/MapLocal/Script/MITM
+# 不做 biliapi 整域 REJECT：搜索可能 fallback 到 api/app.biliapi.net
+# 不要 DOMAIN 整域 REJECT cm.bilibili.com：短视频/评论广告组件可能依赖该域
 URL-REGEX,"^http:\/\/upos-sz-static\.bilivideo\.com\/ssaxcode\/\w{2}\/\w{2}\/\w{32}-1-SPLASH",REJECT-TINYGIF
 URL-REGEX,"^http:\/\/[\d\.]+:8000\/v1\/resource\/\w{32}-1-SPLASH",REJECT-TINYGIF
 
 [Map Local]
-# search/square 仅影响搜索发现页，不拦截 /x/v2/search 与 SearchAll 主结果
-^https?:\/\/ap[ip]\.bilibili\.com\/x\/(?:resource\/(?:top\/activity|patch\/tab)|v2\/search\/square|vip\/ads\/materials) data-type=text data="{}" status-code=200 header="Content-Type: application/json"
+# ===== Gaia 风控设备上报：返回空成功，阻断环境/代理指纹上传 =====
+# ExClimbKunLun / ExClimbCongLing = 设备信息上报
+# ExBadBasket = 异常环境/代理相关上报（IPA 中与 kCFProxyTypeNone、jailbreak 痕迹同区）
+# 注意：这里返回 200+空 JSON，避免 hard REJECT 触发客户端无限重试
+^https?:\/\/api\.bilibili\.com\/x\/internal\/gaia-gateway\/ExClimbKunLun data-type=text data="{}" status-code=200 header="Content-Type: application/json"
+^https?:\/\/api\.bilibili\.com\/x\/internal\/gaia-gateway\/ExClimbCongLing data-type=text data="{}" status-code=200 header="Content-Type: application/json"
+^https?:\/\/api\.bilibili\.com\/x\/internal\/gaia-gateway\/ExBadBasket data-type=text data="{}" status-code=200 header="Content-Type: application/json"
+
+# ===== 常规广告 =====
+# 注意：不再空返回 search/square（搜索发现页/入口依赖，空返回易导致“加载失败，请稍后再试”）
+^https?:\/\/ap[ip]\.bilibili\.com\/x\/(?:resource\/(?:top\/activity|patch\/tab)|vip\/ads\/materials) data-type=text data="{}" status-code=200 header="Content-Type: application/json"
 ^https?:\/\/app\.bilibili\.com\/x\/v2\/banner data-type=text data="{}" status-code=200 header="Content-Type: application/json"
 ^https?:\/\/api\.bilibili\.com\/x\/v2\/dm\/ad data-type=text data="{}" status-code=200 header="Content-Type: application/json"
 ^https?:\/\/app\.bilibili\.com\/x\/resource\/deeplink\/ad data-type=text data="{}" status-code=200 header="Content-Type: application/json"
@@ -24,7 +33,7 @@ URL-REGEX,"^http:\/\/[\d\.]+:8000\/v1\/resource\/\w{32}-1-SPLASH",REJECT-TINYGIF
 ^https?:\/\/api\.bilibili\.com\/pgc\/activity\/deliver\/material\/receive data-type=text data="{}" status-code=200 header="Content-Type: application/json"
 ^https?:\/\/api\.vc\.bilibili\.com\/topic_svr\/v1\/topic_svr data-type=text data="{}" status-code=200 header="Content-Type: application/json"
 ^https?:\/\/api\.vc\.bilibili\.com\/dynamic_svr\/v1\/dynamic_svr\/mix_uplist data-type=text data="{}" status-code=200 header="Content-Type: application/json"
-^https?:\/\/api\.vc\.bilibili\.com\/search_svr\/v\d\/Search\/recommend_words data-type=text data="{}" status-code=200 header="Content-Type: application/json"
+# recommend_words 不再空返回：搜索联想/推荐词失败时部分页面会进加载失败态
 ^https?:\/\/api\.live\.bilibili\.com\/xlive\/e-commerce-interface\/v1\/ecommerce-user\/get_shopping_info data-type=text data="{}" status-code=200 header="Content-Type: application/json"
 ^https?:\/\/line\d?-h5-mobile-api\.biligame\.com\/game\/center\/h5\/small\/game\/advertising_position data-type=text data="{}" status-code=200 header="Content-Type: application/json"
 ^https?:\/\/line\d?-h5-mobile-api\.biligame\.com\/game\/center\/h5\/user\/smallgame\/iaa_ad_style_exp data-type=text data="{}" status-code=200 header="Content-Type: application/json"
@@ -34,13 +43,12 @@ URL-REGEX,"^http:\/\/[\d\.]+:8000\/v1\/resource\/\w{32}-1-SPLASH",REJECT-TINYGIF
 ^https?:\/\/api\.live\.bilibili\.com\/xlive\/app-ucenter\/v1\/ad\/adLiveGame\/getAdLiveGameMaterial data-type=text data="{}" status-code=200 header="Content-Type: application/json"
 ^https?:\/\/game-attribute\.biligame\.com\/mini\/api\/clicK data-type=text data="{}" status-code=200 header="Content-Type: application/json"
 
-[URL Rewrite]
-# DefaultWords 不再 hard reject：搜索入口/联想偶发依赖，reject 可能导致“加载失败”重试态
-
 [Script]
-bili-json = type=http-response,pattern=^https?:\/\/(?:app|api)\.bili(?:bili\.com|api\.net)\/(?:x\/v2\/(?:splash\/(?:brand\/list|event\/list2|list|show)|feed\/index(?:\/story)?|search\/square|banner)|x\/web-interface\/wbi\/index\/top\/feed\/rcmd|pgc\/(?:page\/(?:bangumi|cinema\/tab)|view\/v2\/(?:app\/season|story\/season))|x\/vip\/ads\/materials),requires-body=1,max-size=-1,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/json-response.js,argument=常规广告={{{常规广告}}}&暂停广告={{{暂停广告}}}&小游戏广告={{{小游戏广告}}}&短剧广告={{{短剧广告}}}&调试日志={{{调试日志}}},script-update-interval=0
+# 注意：pattern 不含 search/square，避免脚本再改搜索入口
+bili-json = type=http-response,pattern=^https?:\/\/(?:app|api)\.bili(?:bili\.com|api\.net)\/(?:x\/v2\/(?:splash\/(?:brand\/list|event\/list2|list|show)|feed\/index(?:\/story)?|banner)|x\/web-interface\/wbi\/index\/top\/feed\/rcmd|pgc\/(?:page\/(?:bangumi|cinema\/tab)|view\/v2\/(?:app\/season|story\/season))|x\/vip\/ads\/materials),requires-body=1,max-size=-1,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/json-response.js,argument=常规广告={{{常规广告}}}&暂停广告={{{暂停广告}}}&小游戏广告={{{小游戏广告}}}&短剧广告={{{短剧广告}}}&调试日志={{{调试日志}}},script-update-interval=0
 bili-live-json = type=http-response,pattern=^https?:\/\/api\.live\.bilibili\.com\/xlive\/(?:app-room\/v1\/index\/getInfoByRoom|app-interface\/v2\/index\/feed|app-ucenter\/v1\/ad\/adLiveGame\/getAdLiveGameMaterial),requires-body=1,max-size=-1,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/json-response.js,argument=常规广告={{{常规广告}}}&暂停广告={{{暂停广告}}}&小游戏广告={{{小游戏广告}}}&短剧广告={{{短剧广告}}}&调试日志={{{调试日志}}},script-update-interval=0
 bili-game-json = type=http-response,pattern=^https?:\/\/(?:line\d?-h5-mobile-api\.biligame\.com|miniapp\.bilibili\.com)\/.*(?:advertising_position|iaa_ad_style|\/ad\/position|client\/ad),requires-body=1,max-size=-1,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/json-response.js,argument=常规广告={{{常规广告}}}&暂停广告={{{暂停广告}}}&小游戏广告={{{小游戏广告}}}&短剧广告={{{短剧广告}}}&调试日志={{{调试日志}}},script-update-interval=0
+# 播放页 protobuf 改写保留（用户要求非 cm 问题后已还原）；若详情骨架屏再议
 bili-proto = type=http-response,pattern=^https?:\/\/(?:grpc\.biliapi\.net|app\.bilibili\.com)\/bilibili\.(?:app\.(?:viewunite\.v1\.View\/(?:View|TFInfo|RelatesFeed|PlayPause)|view\.v1\.View\/View|dynamic\.v2\.Dynamic\/Dyn(?:All|Video))),requires-body=1,binary-body-mode=1,max-size=-1,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/proto-response.js,argument=常规广告={{{常规广告}}}&暂停广告={{{暂停广告}}}&小游戏广告={{{小游戏广告}}}&短剧广告={{{短剧广告}}}&调试日志={{{调试日志}}},script-update-interval=0
 
 # 自动签到：打开 App 抓 Cookie + 每天 7:30 执行

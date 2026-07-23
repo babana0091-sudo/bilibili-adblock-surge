@@ -1,11 +1,11 @@
 // Bilibili daily check-in for Surge (network only)
-// - type=http-request on fingerprint: capture Cookie / access_key
+// - type=http-request: capture Cookie / app_access_token (URL access_key)
 // - type=cron: hourly tick; only act at Beijing 00/10/19/21
 //   Day key + slots use Asia/Shanghai (UTC+8), not device local TZ.
 //   First success of that Beijing day marks lastRunOk; later slots no-op.
 //
 // Tasks (VIP only; non-VIP skipped with log only, no notification):
-// 0) VIP probe when session exists: cookie capture / network-changed / cron-start
+// 0) VIP on capture notify + cron; session = Cookie or app_access_token
 //    + again before sign tasks via x/web-interface/nav (fallback x/vip/web/user/info)
 // 1) live DoSign
 // 2) 大积分签到 POST /pgc/activity/score/task/sign
@@ -268,7 +268,7 @@ async function probeVipIfSession(opts, reason, force) {
   }
   const store = readStore();
   const hasCookie = !!(store.cookie && String(store.cookie).includes("SESSDATA"));
-  const hasAK = !!(store.access_key && String(store.access_key).length > 8);
+  const hasAK = !!(store.app_access_token && String(store.app_access_token).length > 8);
   if (!hasCookie && !hasAK) {
     log("vip probe skip: no session (no Cookie SESSDATA and no access_key)", reason || "");
     return null;
@@ -307,7 +307,7 @@ async function probeVipIfSession(opts, reason, force) {
   }
 
   const hdrs = buildAuthHeaders(store);
-  const vip = await detectVipStatus(hdrs, store.access_key || "");
+  const vip = await detectVipStatus(hdrs, store.app_access_token || "");
   store.vipCheckedAt = new Date().toISOString();
   store.vipProbeDay = day;
   store.vipProbeReason = reason || "";
@@ -404,9 +404,8 @@ function isCheckinHourBeijing() {
 
 async function captureCookie(opts) {
   opts = opts || parseArgs(typeof $argument !== "undefined" ? $argument : "");
-  // CRITICAL: http-request on app.bilibili.com must return ASAP.
-  // Never await VIP/network here — it can stall the shared H2 connection
-  // and contribute to feed/index empty responses (inBytes=0).
+  // http-request path: save tokens fast, then VIP lookup only when session changed
+  // (user wants VIP line on capture notify). Keep VIP call short timeout via http().
   if (!opts.自动签到) {
     log("capture skip: checkin=false");
     $done({});
@@ -419,7 +418,7 @@ async function captureCookie(opts) {
   const store = readStore();
   let changed = false;
   let gotCookie = false;
-  let gotAccessKey = false;
+  let gotToken = false;
 
   if (cookie && cookie.includes("SESSDATA")) {
     gotCookie = true;
@@ -433,29 +432,32 @@ async function captureCookie(opts) {
     if (m.DedeUserID) store.uid = m.DedeUserID;
   }
 
-  // App requests often have NO Cookie header; session is access_key in query.
+  // App: login token is access_key in query (stored as app_access_token)
   try {
     const u = new URL(url);
     const ak = u.searchParams.get("access_key");
     if (ak && ak.length > 8) {
-      gotAccessKey = true;
-      if (store.access_key !== ak) {
-        store.access_key = ak;
-        store.accessKeyUpdatedAt = new Date().toISOString();
+      gotToken = true;
+      if (store.app_access_token !== ak) {
+        store.app_access_token = ak;
+        store.appAccessTokenUpdatedAt = new Date().toISOString();
         changed = true;
       }
     }
   } catch (e) {}
 
-  // Also accept access_key from body if present (rare)
   try {
     const body = ($request && $request.body) || "";
     if (typeof body === "string" && body.includes("access_key=")) {
       const m = body.match(/access_key=([^&]+)/);
-      if (m && m[1] && store.access_key !== m[1]) {
-        store.access_key = decodeURIComponent(m[1]);
-        gotAccessKey = true;
-        changed = true;
+      if (m && m[1]) {
+        const ak = decodeURIComponent(m[1]);
+        if (ak.length > 8 && store.app_access_token !== ak) {
+          store.app_access_token = ak;
+          store.appAccessTokenUpdatedAt = new Date().toISOString();
+          gotToken = true;
+          changed = true;
+        }
       }
     }
   } catch (e) {}
@@ -464,57 +466,100 @@ async function captureCookie(opts) {
     store.authorization = auth;
   }
 
-  // mid header as weak uid hint
   const mid = getHeader(headers, "x-bili-mid") || getHeader(headers, "X-Bili-Mid");
   if (mid && !store.uid) store.uid = String(mid);
 
-  if (changed || gotCookie || gotAccessKey) {
+  const hasSession = !!(
+    (store.cookie && String(store.cookie).includes("SESSDATA")) ||
+    (store.app_access_token && String(store.app_access_token).length > 8)
+  );
+
+  if (changed || gotCookie || gotToken) {
     writeStore(store);
   }
 
   log(
     "capture done",
     "cookie=" + (gotCookie ? "yes" : "no"),
-    "access_key=" + (store.access_key ? "yes" : "no"),
+    "app_access_token=" + (store.app_access_token ? "yes" : "no"),
     "changed=" + changed,
     "url=" + url.slice(0, 80)
   );
 
-  // Notify when session token newly stored or upgraded.
-  // App 主路径几乎只有 access_key，没有 Cookie——这算抓到登录态。
-  // VIP 不在这里查（避免拖死首页请求）。
-  const firstSession =
-    !store.sessionNotifiedAt && (gotCookie || gotAccessKey || store.access_key || store.cookie);
-  if ((changed && (gotCookie || gotAccessKey)) || (firstSession && (store.access_key || gotCookie))) {
-    store.sessionNotifiedAt = new Date().toISOString();
+  // Notify when token/cookie newly stored (new field name app_access_token forces re-trigger once)
+  const shouldNotify =
+    hasSession &&
+    (changed || !store.sessionNotifiedAtV2) &&
+    (gotCookie || gotToken || store.app_access_token || store.cookie);
+
+  if (shouldNotify) {
+    // Capture-time VIP query (user requested). Prefer short path; failure → 查询失败
+    let vipLine = "会员: 查询失败";
+    try {
+      const hdrs = buildAuthHeaders(store);
+      const vip = await detectVipStatus(hdrs, store.app_access_token || "");
+      store.vipCheckedAt = new Date().toISOString();
+      store.vipProbeReason = "capture";
+      if (vip && vip.detail && /detect failed/i.test(String(vip.detail))) {
+        store.isVip = false;
+        store.vipDetail = vip.detail || "";
+        vipLine = "会员: 查询失败";
+      } else if (vip && vip.isVip === true) {
+        store.isVip = true;
+        store.vipDetail = vip.detail || "";
+        vipLine = "会员: 大会员";
+      } else if (vip && vip.isVip === false) {
+        store.isVip = false;
+        store.vipDetail = vip.detail || "";
+        // distinguish login-ok non-vip vs hard fail: if detail has isLogin/mid treat as 非大会员
+        if (
+          vip.detail &&
+          (/isLogin=true/i.test(vip.detail) ||
+            /mid=\d+/i.test(vip.detail) ||
+            /vipStatus=/i.test(vip.detail) ||
+            /oauth2/i.test(vip.detail) ||
+            /nav /i.test(vip.detail))
+        ) {
+          vipLine = "会员: 非大会员";
+        } else if (vip.detail && /failed|err|未登录|-101/i.test(vip.detail)) {
+          vipLine = "会员: 查询失败";
+        } else {
+          vipLine = "会员: 非大会员";
+        }
+      } else {
+        vipLine = "会员: 查询失败";
+      }
+      log("capture vip", vipLine, vip && vip.detail);
+    } catch (e) {
+      vipLine = "会员: 查询失败";
+      log("capture vip err", e);
+    }
+
+    store.sessionNotifiedAtV2 = new Date().toISOString();
     writeStore(store);
+
+    // Order: VIP first, token, uid, Cookie last (least important)
     const parts = [];
+    parts.push(vipLine);
+    if (store.app_access_token) parts.push("access_token: 有");
+    else parts.push("access_token: 无");
+    if (store.uid) parts.push("UID " + store.uid);
     if (gotCookie || (store.cookie && String(store.cookie).includes("SESSDATA")))
       parts.push("Cookie: 有");
-    else parts.push("Cookie: 无(App常无Cookie头)");
-    if (store.access_key) parts.push("access_key: 有");
-    else parts.push("access_key: 无");
-    if (store.uid) parts.push("UID " + store.uid);
-    parts.push(
-      store.isVip === true
-        ? "会员: 大会员(缓存)"
-        : store.isVip === false
-          ? "会员: 非大会员(缓存)"
-          : "会员: 待cron检测"
-    );
-    parts.push("登录态已保存，可用于签到");
+    else parts.push("Cookie: 无");
+    parts.push("登录态已保存");
+
     notify(NAME, "登录态已捕获", parts.join("\n"));
     log("session notify", parts.join(" | "));
   }
 
-  // Always release the request immediately
   $done({});
 }
 
 async function doCheckin(opts) {
   const store = readStore();
   const hasCookie = !!(store.cookie && String(store.cookie).includes("SESSDATA"));
-  const hasAK = !!(store.access_key && String(store.access_key).length > 8);
+  const hasAK = !!(store.app_access_token && String(store.app_access_token).length > 8);
   if (!hasCookie && !hasAK) {
     // Throttle "no session" notifications: at most once per 6 hours
     const lastN = store.lastNoSessionNotifyAt
@@ -583,7 +628,7 @@ async function doCheckin(opts) {
 
   const cookie = store.cookie || "";
   const csrf = store.csrf || cookieMap(cookie).bili_jct || "";
-  const accessKey = store.access_key || "";
+  const accessKey = store.app_access_token || "";
   const baseHeaders = {
     "User-Agent":
       "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BiliApp",
@@ -649,8 +694,8 @@ async function doCheckin(opts) {
     });
     let body = "";
     if (csrf) body = "csrf=" + encodeURIComponent(csrf);
-    if (store.access_key) {
-      body = (body ? body + "&" : "") + "access_key=" + encodeURIComponent(store.access_key);
+    if (store.app_access_token) {
+      body = (body ? body + "&" : "") + "access_key=" + encodeURIComponent(store.app_access_token);
     }
     const r = await http(
       "POST",

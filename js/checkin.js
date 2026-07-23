@@ -4,11 +4,12 @@
 //   Day key + slots use Asia/Shanghai (UTC+8), not device local TZ.
 //   First success of that Beijing day marks lastRunOk; later slots no-op.
 //
-// Tasks (best-effort, API may change):
-// 1) live DoSign  (GET /xlive/web-ucenter/v1/sign/DoSign)
-// 2) VIP 大积分签到 (POST /pgc/activity/score/task/sign) — 大会员
+// Tasks (VIP only; non-VIP skipped with log only, no notification):
+// 0) detect VIP via x/web-interface/nav (fallback x/vip/web/user/info)
+// 1) live DoSign
+// 2) 大积分签到 POST /pgc/activity/score/task/sign
 // 3) exp/reward status
-// 4) vip privilege receive (monthly B-coin coupon if eligible)
+// 4) vip privilege receive (optional)
 // 5) silver2coin (optional)
 // Random delay before tasks to avoid整点风控
 //
@@ -111,6 +112,63 @@ function cookieMap(cookie) {
       if (k) o[k] = v;
     });
   return o;
+}
+
+async function detectVipStatus(baseHeaders) {
+  // Prefer nav (vipStatus/vipType); fallback vip/web/user/info
+  // Returns { isVip: boolean, detail: string }
+  try {
+    const r = await http(
+      "GET",
+      "https://api.bilibili.com/x/web-interface/nav",
+      baseHeaders
+    );
+    const j = JSON.parse(r.data || "{}");
+    if (j.code === 0 && j.data) {
+      const d = j.data;
+      const vip = d.vip || {};
+      const status = vip.status != null ? vip.status : d.vipStatus;
+      const type = vip.type != null ? vip.type : d.vipType;
+      const due = vip.due_date || vip.dueDate || d.vipDueDate || 0;
+      // status===1 大会员有效；type 1/2 月度/年度等
+      const isVip = status === 1 || status === true || (type > 0 && status !== 0);
+      const detail =
+        "nav vipStatus=" +
+        status +
+        " vipType=" +
+        type +
+        " due=" +
+        due +
+        " isLogin=" +
+        !!d.isLogin;
+      return { isVip: !!isVip, detail: detail };
+    }
+    log("nav vip code", j.code, j.message || j.msg || "");
+  } catch (e) {
+    log("nav vip err", e);
+  }
+  try {
+    const r = await http(
+      "GET",
+      "https://api.bilibili.com/x/vip/web/user/info",
+      baseHeaders
+    );
+    const j = JSON.parse(r.data || "{}");
+    if (j.code === 0 && j.data) {
+      const d = j.data;
+      const status = d.vip_status != null ? d.vip_status : d.status;
+      const type = d.vip_type != null ? d.vip_type : d.type;
+      const isVip = status === 1 || (type > 0 && status !== 0);
+      return {
+        isVip: !!isVip,
+        detail: "vip/web/user/info status=" + status + " type=" + type,
+      };
+    }
+    log("vip info code", j.code, j.message || j.msg || "");
+  } catch (e) {
+    log("vip info err", e);
+  }
+  return { isVip: false, detail: "detect failed / not vip" };
 }
 
 function http(method, url, headers, body) {
@@ -295,6 +353,19 @@ async function doCheckin(opts) {
     Referer: "https://www.bilibili.com/",
     Origin: "https://www.bilibili.com",
   };
+
+  // 大会员判断：只写日志，不弹窗；非会员整次签到跳过
+  const vip = await detectVipStatus(baseHeaders);
+  store.vipCheckedAt = new Date().toISOString();
+  store.isVip = !!vip.isVip;
+  store.vipDetail = vip.detail || "";
+  writeStore(store);
+  log("vip detect:", vip.isVip ? "YES" : "NO", vip.detail || "");
+  if (!vip.isVip) {
+    log("skip checkin: not VIP (no notification)");
+    $done({});
+    return;
+  }
 
   const lines = [];
   let okAny = false;

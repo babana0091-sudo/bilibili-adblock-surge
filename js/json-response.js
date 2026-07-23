@@ -60,8 +60,79 @@ function log(enabled, ...args) {
   if (enabled) console.log("[BiliAD][json]", ...args);
 }
 
+
+/** 竖屏流红果/天马广告短剧卡：整卡从 items 移除，用户刷不到 */
+function isHongguoOrAdStory(item) {
+  if (!item || typeof item !== "object") return false;
+  const goto = String(
+    item.card_goto || item.goto || item.type || item.cardType || ""
+  ).toLowerCase();
+  const cardType = String(item.card_type || item.cardType || "").toLowerCase();
+  const uri = String(
+    item.uri || item.link || item.jump_url || item.blink || item.route || ""
+  );
+  const title = String(
+    item.title || item.desc || item.subtitle || item.rcmd_reason || ""
+  );
+  const up = String(
+    (item.args && (item.args.up_name || item.args.rname)) ||
+      item.up_name ||
+      item.author_name ||
+      item.desc ||
+      ""
+  );
+  const spmid = String(
+    item.from_spmid ||
+      item.spmid ||
+      (item.three_point_v2 && item.three_point_v2.spmid) ||
+      ""
+  );
+  const blob = (
+    goto +
+    " " +
+    cardType +
+    " " +
+    uri +
+    " " +
+    title +
+    " " +
+    up +
+    " " +
+    spmid +
+    " " +
+    JSON.stringify(item.ad_info || {}) +
+    " " +
+    String(item.ad_story_extra || "")
+  ).toLowerCase();
+
+  // 抓包特征：card_goto=ad_av + up/desc 含红果；from_spmid=ad.tianma...
+  if (/红果/.test(title + up + uri) || blob.includes("hongguo")) return true;
+  if (/免费短剧|海量短剧|热门短剧/.test(title + up)) return true;
+  if (spmid.includes("ad.tianma") || blob.includes("ad.tianma")) return true;
+  if (goto === "ad_av" || goto.startsWith("ad_")) {
+    // 广告 av 卡（含竖屏广告短剧）
+    if (
+      /红果|短剧|playlet|tianma|creative_id|ad_story/.test(blob) ||
+      item.ad_info ||
+      item.ad_cb ||
+      item.is_ad ||
+      item.is_ad_loc
+    )
+      return true;
+  }
+  if (item.ad_info || item.ad_cb || item.is_ad || item.is_ad_loc) {
+    if (/红果|短剧|playlet|tianma|snssdk|download/.test(blob)) return true;
+  }
+  // uri 带 ad_story_extra / creative_id 的 story 广告
+  if (/ad_story_extra|creative_id=/.test(uri) && /story|ad_av|vertical/.test(blob))
+    return true;
+  return false;
+}
+
 function isAdItem(item, opts) {
   if (!item || typeof item !== "object") return false;
+  // 红果/天马广告短剧：整卡删除（彻底刷不到）
+  if ((opts.短剧广告 || opts.常规广告) && isHongguoOrAdStory(item)) return true;
   if (item.ad_info || item.ad_cb || item.is_ad || item.is_ad_loc)
     return opts.常规广告;
   const goto = String(
@@ -235,15 +306,19 @@ function handleFeed(body, opts, url) {
       if (isStory) {
         const goto = String(item.card_goto || item.goto || "").toLowerCase();
         const uri = String(item.uri || item.link || item.jump_url || "");
+        // 整卡移除：红果/天马/ad_av 广告短剧（不只去链接）
+        if ((opts.短剧广告 || opts.常规广告) && isHongguoOrAdStory(item)) return false;
         // 竖屏流广告卡
         if ((opts.短剧广告 || opts.常规广告) && (goto.startsWith("ad") || item.ad_info || item.ad_cb))
           return false;
-        // 短剧/外链下载推广（如红果短剧条）
+        // 短剧/外链下载推广
         if (
           opts.短剧广告 &&
-          (/playlet|short_play|shortplay|hongguo|drama/i.test(goto + uri) ||
-            /红果|免费短剧|海量短剧/.test(
-              String(item.title || "") + String(item.desc || "")
+          (/playlet|short_play|shortplay|hongguo|drama|ad_story|tianma/i.test(goto + uri) ||
+            /红果|免费短剧|海量短剧|热门短剧/.test(
+              String(item.title || "") +
+                String(item.desc || "") +
+                String((item.args && item.args.up_name) || item.up_name || "")
             ))
         ) {
           return false;

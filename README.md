@@ -84,6 +84,18 @@ js/                        # 脚本
 LICENSE                    # AGPL-3.0
 ```
 
+## 分支与脚本
+
+| 分支 | 模块 raw | 脚本 raw |
+|:--|:--|:--|
+| `main` | `.../main/bilibili-adblock.sgmodule` | 仅 `.../main/js/*` |
+| `dev` | `.../dev/bilibili-adblock.sgmodule` | 仅 `.../dev/js/*` |
+
+**禁止交叉引用**（main 不能指 dev 的 JS，反之亦然）。  
+CI：`scripts/validate_module.py` + `.github/workflows/validate.yml` 会在 push/PR 校验。
+
+远程模块必须用 **raw 绝对 URL**；相对路径 `js/xxx.js` 会报「资源不存在」。
+
 ## 开发
 
 请在 **`dev`** 分支开发与提交，不要直接往 `main` 推实验改动。稳定后再合并到 `main`。

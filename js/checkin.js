@@ -331,6 +331,7 @@ function isCheckinHourBeijing() {
 async function captureCookie(opts) {
   opts = opts || parseArgs(typeof $argument !== "undefined" ? $argument : "");
   if (!opts.自动签到) {
+    log("capture skip: checkin=false");
     $done({});
     return;
   }
@@ -654,15 +655,36 @@ async function doCheckin(opts) {
     typeof $script !== "undefined" && $script && $script.type
       ? String($script.type)
       : "";
-  // Surge: http-request = capture; event = network-changed boot probe; else cron checkin
+  const sname =
+    typeof $script !== "undefined" && $script && $script.name
+      ? String($script.name)
+      : "";
+  const store0 = readStore();
+  const hasSession = !!(store0.cookie && String(store0.cookie).includes("SESSDATA"));
+  // 任何触发都必须先打这条，方便在 Surge 日志里确认脚本真的跑了
+  log(
+    "boot",
+    "v=" + SCRIPT_VERSION,
+    "type=" + (stype || (typeof $request !== "undefined" && $request ? "http-request" : "cron?")),
+    "name=" + sname,
+    "checkin=" + !!opts.自动签到,
+    "session=" + (hasSession ? "yes" : "no"),
+    "bj=" + JSON.stringify(beijingParts())
+  );
+
+  // Surge: http-request = capture; event = network-changed; else cron/manual
   if (typeof $request !== "undefined" && $request && $request.url) {
+    log("path=capture", String($request.url).slice(0, 120));
     await captureCookie(opts);
   } else if (stype === "event") {
-    // 插件/网络环境变化时：Session 存在则额外检查会员（仅日志）
-    log("event start", stype, "probe vip if session");
+    log("path=event network-changed, probe vip if session");
+    if (!hasSession) {
+      log("event: no session yet — open Bilibili app once to capture Cookie");
+    }
     await probeVipIfSession(opts, "network-changed", false);
     $done({});
   } else {
+    log("path=cron/manual doCheckin");
     await doCheckin(opts);
   }
 })().catch((e) => {

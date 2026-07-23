@@ -369,6 +369,14 @@ function today() {
   return beijingParts().day;
 }
 
+/** Device/phone local calendar day YYYY-MM-DD (for session notify once/day). */
+function deviceLocalDay(date) {
+  const d = date || new Date();
+  const p = (n) => (n < 10 ? "0" + n : "" + n);
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+}
+
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -472,8 +480,10 @@ async function captureCookie(opts) {
     "url=" + String(url).slice(0, 90)
   );
 
-  // ONLY notify when session credentials actually change (new/rotated token or cookie).
-  // Same access_key on feed/splash/fingerprint must NOT popup again.
+  // Notify policy (device local timezone day):
+  // - At most once per local calendar day
+  // - After a notify today, no more that day even if token rotates
+  // - Next local day: notify again only if token/cookie changed (sessionChanged)
   if (!sessionChanged) {
     $done({});
     return;
@@ -488,7 +498,14 @@ async function captureCookie(opts) {
     return;
   }
 
-  // VIP only when we will notify (session really changed)
+  const localDay = deviceLocalDay();
+  if (store.sessionNotifyLocalDay === localDay) {
+    log("capture notify skip: already notified local day", localDay);
+    $done({});
+    return;
+  }
+
+  // VIP only when we will notify (new local day + credentials changed)
   let vipLine = "会员: 查询失败";
   try {
     const hdrs = buildAuthHeaders(store);
@@ -537,6 +554,7 @@ async function captureCookie(opts) {
   }
 
   store.sessionNotifyAt = new Date().toISOString();
+  store.sessionNotifyLocalDay = deviceLocalDay(); // phone local calendar day
   writeStore(store);
 
   // Order: 会员 → access_token → UID → Cookie last
@@ -551,7 +569,7 @@ async function captureCookie(opts) {
   );
   parts.push("登录态已保存");
   notify(NAME, "登录态已捕获", parts.join("\n"));
-  log("session notify (credentials changed)", parts.join(" | "));
+  log("session notify (local day + credentials changed)", localDay, parts.join(" | "));
   $done({});
 }
 

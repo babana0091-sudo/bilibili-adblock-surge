@@ -1346,15 +1346,17 @@ async function doCheckin(opts, flags) {
     }
     const isTrigger =
       typeof isCheckinTriggerUrl === "function" && isCheckinTriggerUrl(reqUrl);
-    // 前 N 个请求：不签到，立刻放行
+    // 前 N 个请求：只 capture，立刻放行（不 await 签到，避免并发/卡启动）
     if (openN > 0 && openN <= OPEN_SKIP_CHECKIN_FIRST_N) {
       log("fast-path: first", openN, "requests skip checkin");
       $done({});
       return;
     }
-    const should = opts.自动签到 && isTrigger;
+    // 第 N+1 个请求起：尝试签到一次（不要求必须是 trigger URL，否则 trigger 全在前 N 会永远不签）
+    // 互斥锁保证并发只会真正执行一个
+    const should = !!opts.自动签到;
     if (should) {
-      log("path=open-app checkin BEFORE $done (after first N)");
+      log("path=open-app checkin on req#", openN, "trigger=" + isTrigger);
       try {
         await doCheckin(opts, { fromOpen: true });
       } catch (e) {
@@ -1362,11 +1364,7 @@ async function doCheckin(opts, flags) {
         notify(NAME, "签到失败", String(e));
       }
     } else {
-      log(
-        "path=capture only",
-        "trigger=" + isTrigger,
-        "checkin=" + !!opts.自动签到
-      );
+      log("path=capture only, checkin disabled");
     }
     $done({});
   } else if (stype === "event") {

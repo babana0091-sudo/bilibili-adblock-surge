@@ -1,11 +1,11 @@
 #!name=哔哩哔哩去广告（融合增强）
-#!desc=Surge 网络 MITM 去广告。v1.2.4：参数改 ASCII 确保 false 生效；暂时禁用 View protobuf 改写（修简介空白）；全 false 应接近旁路。
+#!desc=Surge 网络 MITM 去广告。v1.2.5：修复参数说明换行显示；参数键保持 ASCII。
 #!author=babana0091-sudo
 #!homepage=https://github.com/babana0091-sudo/bilibili-adblock-surge
 #!category=去广告
-#!version=1.2.4
+#!version=1.2.5
 #!arguments=ad_normal:true,ad_pause:true,ad_game:true,ad_drama:true,checkin:false,silver2coin:false,block_risk:false,debug:false
-#!arguments-desc=ad_normal(常规广告): 开屏/推荐/信息流等\\n默认 true\\n\\nad_pause(暂停广告): 暂停页商业卡\\n默认 true\\n\\nad_game(小游戏广告)\\n默认 true\\n\\nad_drama(短剧广告)\\n默认 true\\n\\ncheckin(自动签到)\\n默认 false\\n\\nsilver2coin(银瓜子换硬币)\\n默认 false\\n\\nblock_risk(拦截Gaia风控上报)\\n默认 false\\n\\ndebug(调试日志)\\n默认 false
+#!arguments-desc=ad_normal(常规广告): 开屏/推荐/信息流等\n默认 true\n\nad_pause(暂停广告): 暂停页商业卡\n默认 true\n\nad_game(小游戏广告)\n默认 true\n\nad_drama(短剧广告)\n默认 true\n\ncheckin(自动签到)\n默认 false\n\nsilver2coin(银瓜子换硬币)\n默认 false\n\nblock_risk(拦截Gaia风控上报)\n默认 false\n\ndebug(调试日志)\n默认 false
 
 [Rule]
 URL-REGEX,"^http:\/\/upos-sz-static\.bilivideo\.com\/ssaxcode\/\w{2}\/\w{2}\/\w{32}-1-SPLASH",REJECT-TINYGIF

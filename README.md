@@ -103,7 +103,7 @@ INSTALL.md
 根因：`DOMAIN,cm.bilibili.com,REJECT` 整域拒绝太狠。  
 评论半屏广告组件会访问该域，整域拒绝时 UI 可能一直等。
 
-### 当前版本：v1.1.5（详情页轻量化）
+### 当前版本：v1.1.6（cm 不做 MITM）
 
 - **取消** `DOMAIN,cm.bilibili.com,REJECT`
 - **不**对 cm 做 Map Local 空返回（1.1.3 已回退；版本号升到 1.1.4 方便 Surge 直接更新）
@@ -132,6 +132,28 @@ v1.1.5 已：
 - 去掉 `bili-proto`
 - 去掉 `biliapi.*` 整域 REJECT
 - 保留普通广告 Map Local / JSON 去广告
+
+
+
+## 日志：cm.bilibili.com certificate pinning
+
+若出现：
+
+```text
+Client closed connection just after TLS handshake
+it might because of certificate pinning
+Host: cm.bilibili.com:443
+```
+
+说明 B 站对 `cm.bilibili.com` 做了证书锁定。  
+对该域做 MITM 时，握手后客户端会主动断开；广告组件等待失败时，详情/评论可能一直骨架屏。
+
+### v1.1.6 策略
+
+- **不 MITM** `cm.bilibili.com`（直连，避免 pinning 冲突）
+- **不整域 REJECT** `cm.bilibili.com`
+- 其它广告 Map Local / JSON 仍保留
+- 模块仍**不含代理策略**
 
 
 ## License

@@ -1,9 +1,9 @@
 #!name=哔哩哔哩去广告（融合增强）
-#!desc=Surge 网络 MITM：常规/暂停/小游戏/短剧广告 + 可选自动签到。v1.1.5：详情页轻量化——去掉 biliapi 整域 REJECT 与播放页 protobuf 改写，减轻简介/评论骨架屏卡住。
+#!desc=Surge 网络 MITM：常规/暂停/小游戏/短剧广告 + 可选自动签到。v1.1.6：cm.bilibili.com 不再 MITM（避免证书锁定掐断导致详情/评论骨架屏卡住）；也不整域 REJECT。
 #!author=babana0091-sudo
 #!homepage=https://github.com/babana0091-sudo/bilibili-adblock-surge
 #!category=去广告
-#!version=1.1.5
+#!version=1.1.6
 #!arguments=常规广告:true,暂停广告:true,小游戏广告:true,短剧广告:true,自动签到:true,银瓜子换硬币:false,调试日志:false
 #!arguments-desc=常规广告: 开屏、推荐 Banner、信息流、搜索、直播/番剧页等基础广告\n默认开启\n\n暂停广告: 播放暂停时的暂停页/框下商业卡（网络层可拦截部分）\n默认开启\n\n小游戏广告: 小游戏广告位、IAA、直播小游戏物料、游戏推广卡\n默认开启\n\n短剧广告: Story 竖屏流广告与短剧/playlet 推广\n默认开启\n\n自动签到: 打开 App 自动抓 Cookie，每天定时直播签到/查经验/尝试大会员福利\n默认开启\n\n银瓜子换硬币: 签到时是否尝试银瓜子换硬币\n默认关闭\n\n调试日志: 脚本调试日志\n默认关闭
 
@@ -47,4 +47,4 @@ bili-checkin-capture = type=http-request,pattern=^https?:\/\/app\.bilibili\.com\
 bili-checkin-cron = type=cron,cronexp=30 7 * * *,wake-system=1,timeout=30,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/js/checkin.js,argument=自动签到={{{自动签到}}}&银瓜子换硬币={{{银瓜子换硬币}}}&调试日志={{{调试日志}}},script-update-interval=0
 
 [MITM]
-hostname = %APPEND% app.bilibili.com, api.bilibili.com, api.biliapi.net, app.biliapi.net, grpc.biliapi.net, api.live.bilibili.com, api.vc.bilibili.com, manga.bilibili.com, cm.bilibili.com, miniapp.bilibili.com, line1-h5-mobile-api.biligame.com, line3-h5-mobile-api.biligame.com, game-attribute.biligame.com, app.biligame.com
+hostname = %APPEND% app.bilibili.com, api.bilibili.com, api.biliapi.net, app.biliapi.net, grpc.biliapi.net, api.live.bilibili.com, api.vc.bilibili.com, manga.bilibili.com, miniapp.bilibili.com, line1-h5-mobile-api.biligame.com, line3-h5-mobile-api.biligame.com, game-attribute.biligame.com, app.biligame.com

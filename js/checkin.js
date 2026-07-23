@@ -6,7 +6,7 @@
 // Storage: bili_adblock_checkin_v2
 
 const STORE_KEY = "bili_adblock_checkin_v2"; // v2: 换键丢弃旧 lastRunOk，避免误标成功导致不再签
-const SCRIPT_VERSION = "2.0.13";
+const SCRIPT_VERSION = "2.0.14";
 const NAME = "哔哩签到";
 
 function parseArgs(raw) {
@@ -892,6 +892,17 @@ function releaseCheckinLock(token, reason) {
   }
 }
 
+
+/** API says already done today (manual sign / prior run) — NOT a script failure. */
+function isAlreadyDoneCodeMsg(code, msg) {
+  msg = String(msg || "");
+  if (/已签|重复|already|今日已|签到过|已完成|已领取|已经领取|领取过|已兑换|请勿重复/i.test(msg))
+    return true;
+  if (code === 71000 || code === 6000002 || code === 69198 || code === 69801)
+    return true;
+  return false;
+}
+
 async function doCheckin(opts, flags) {
   flags = flags || {};
   const fromOpen = !!flags.fromOpen;
@@ -1080,8 +1091,7 @@ async function doCheckin(opts, flags) {
         } catch (e) {}
         if (
           js.code === 0 ||
-          js.code === 71000 ||
-          /已分享|重复/i.test(String(js.message || ""))
+          isAlreadyDoneCodeMsg(js.code, js.message || js.msg)
         ) {
           okAny = true;
           lines.push(
@@ -1222,36 +1232,49 @@ async function doCheckin(opts, flags) {
               "大积分签到: 成功" +
                 (j.data && j.data.count != null ? " count=" + j.data.count : "")
             );
-          } else if (
-            /已签|重复|already|今日已|签到过|已完成/i.test(msg) ||
-            j.code === 71000 ||
-            j.code === 6000002
-          ) {
+          } else if (isAlreadyDoneCodeMsg(j.code, msg)) {
+            // 用户手动签过 / 今日已签 → 算完成，不失败、不退避
             okAny = true;
             lines.push("大积分签到: 今日已签 (" + j.code + ")");
-          } else if (
-            j.code === 6007000 &&
-            /已签|重复|今日|刷新重试|请勿重复/i.test(msg)
-          ) {
-            const stNow = dayState(store, day);
-            if (stNow.ok || /已签|重复|今日/i.test(msg)) {
+          } else {
+            // 失败时再查一次服务端状态：手动签到后接口可能返回 6007000「请刷新重试」
+            let signedNow = false;
+            try {
+              const info2 = await http(
+                "GET",
+                "https://api.bilibili.com/x/vip/vip_center/sign_in/three_days_sign?csrf=" +
+                  encodeURIComponent(csrf),
+                webHeaders(store, "https://big.bilibili.com/mobile/bigPoint/task"),
+                null,
+                8
+              );
+              const ji2 = JSON.parse(info2.data || "{}");
+              if (
+                ji2.code === 0 &&
+                ji2.data &&
+                ji2.data.three_day_sign &&
+                ji2.data.three_day_sign.signed
+              ) {
+                signedNow = true;
+              }
+            } catch (e) {
+              log("three_day_sign recheck err", e);
+            }
+            if (signedNow) {
               okAny = true;
-              lines.push("大积分签到: 今日已签/并发重复");
+              lines.push("大积分签到: 今日已签（服务端确认，含手动签到）");
+            } else if (j.code === -663) {
+              hardFail = true;
+              lines.push("大积分签到: 失败 code=-663 鉴权失败");
             } else {
               hardFail = true;
-              lines.push("大积分签到: 失败 code=" + j.code + " " + msg);
+              lines.push(
+                "大积分签到: 失败 code=" +
+                  (j.code != null ? j.code : r.status) +
+                  " " +
+                  msg
+              );
             }
-          } else if (j.code === -663) {
-            hardFail = true;
-            lines.push("大积分签到: 失败 code=-663 鉴权失败");
-          } else {
-            hardFail = true;
-            lines.push(
-              "大积分签到: 失败 code=" +
-                (j.code != null ? j.code : r.status) +
-                " " +
-                msg
-            );
           }
         }
       }
@@ -1330,11 +1353,7 @@ async function doCheckin(opts, flags) {
             lines.push(
               "等级加速包: 领取成功" + (granted ? "（+经验）" : "")
             );
-          } else if (
-            /已领取|已经领取|领取过|已兑换/i.test(msg) ||
-            j.code === 69198 ||
-            j.code === 69801
-          ) {
+          } else if (isAlreadyDoneCodeMsg(j.code, msg)) {
             okAny = true;
             lines.push("等级加速包: 已领取过");
           } else if (
@@ -1349,14 +1368,41 @@ async function doCheckin(opts, flags) {
                 msg
             );
           } else {
-            hardFail = true;
-            lines.push(
-              "等级加速包: 失败 code=" +
-                (j.code != null ? j.code : r.status) +
-                " " +
-                msg
-            );
-            log("experience/add raw", String(r.data || "").slice(0, 200));
+            // 再查 privilege state：用户手动领过则 state=1，不算失败
+            let state2 = null;
+            try {
+              const pr2 = await http(
+                "GET",
+                "https://api.bilibili.com/x/vip/privilege/my",
+                webHeaders(store, "https://account.bilibili.com/account/big"),
+                null,
+                8
+              );
+              const pj2 = JSON.parse(pr2.data || "{}");
+              if (pj2.code === 0 && pj2.data && Array.isArray(pj2.data.list)) {
+                const item2 = pj2.data.list.find(function (x) {
+                  return x && Number(x.type) === 9;
+                });
+                if (item2) state2 = item2.state;
+              }
+            } catch (e) {
+              log("privilege/my recheck err", e);
+            }
+            if (state2 === 1) {
+              okAny = true;
+              lines.push("等级加速包: 已领取（服务端确认，含手动领取）");
+            } else if (state2 === 2) {
+              lines.push("等级加速包: 需先观看视频约1分钟后再领（未完成）");
+            } else {
+              hardFail = true;
+              lines.push(
+                "等级加速包: 失败 code=" +
+                  (j.code != null ? j.code : r.status) +
+                  " " +
+                  msg
+              );
+              log("experience/add raw", String(r.data || "").slice(0, 200));
+            }
           }
         }
       }
@@ -1399,7 +1445,7 @@ async function doCheckin(opts, flags) {
   // 解析 lines 粗分 pending 项（大积分/分享）
   const pending = [];
   const textAll = lines.join("\n");
-  // 已成功/已签 不算失败项
+  // 已成功/已签/已领取（含用户手动完成）不算失败项，不进退避
   const bigpointFailed =
     /大积分签到: 失败|大积分签到: 异常/i.test(textAll) &&
     !/大积分签到: 成功|大积分签到: 今日已签/i.test(textAll);

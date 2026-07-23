@@ -196,8 +196,9 @@ async function doCheckin(opts) {
     return;
   }
 
-  const day = today();
-  // One success per local calendar day: later cron slots skip entirely.
+  const day = today(); // local YYYY-MM-DD; new day => lastRunDay mismatch => runs again
+  // Same local day + already succeeded: skip remaining 0/10/19/21 slots.
+  // Cross midnight: day string changes, so this is once-per-day, not once-forever.
   if (store.lastRunDay === day && store.lastRunOk) {
     log("already succeeded today, skip slot");
     $done({});

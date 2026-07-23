@@ -366,18 +366,42 @@ async function captureCookie(opts) {
     store.authorization = auth;
   }
 
-  if (changed) {
-    writeStore(store);
-    notify(NAME, "Cookie 已更新", "将用于每日自动签到");
-    log("cookie updated", store.uid || "");
-  }
-  // Session 存在：插件/会话就绪时额外检查一次会员（仅日志）
+  // Session 存在：先查会员（日志 + 供通知展示），再发 Cookie 通知
+  let vipInfo = null;
   if (store.cookie && String(store.cookie).includes("SESSDATA")) {
     try {
-      await probeVipIfSession(opts, changed ? "session-ready" : "session-exists", !!changed);
+      vipInfo = await probeVipIfSession(
+        opts,
+        changed ? "session-ready" : "session-exists",
+        !!changed
+      );
     } catch (e) {
       log("vip probe on capture err", e);
     }
+  }
+
+  if (changed) {
+    writeStore(store);
+    // 通知里带上会员状态（查不到则写未知）
+    let vipLine = "会员状态: 未知";
+    if (vipInfo && vipInfo.cached && store.isVip != null) {
+      vipLine = store.isVip ? "会员状态: 大会员" : "会员状态: 非大会员";
+    } else if (vipInfo && vipInfo.isVip === true) {
+      vipLine = "会员状态: 大会员";
+    } else if (vipInfo && vipInfo.isVip === false) {
+      vipLine = "会员状态: 非大会员";
+    } else if (store.isVip === true) {
+      vipLine = "会员状态: 大会员";
+    } else if (store.isVip === false) {
+      vipLine = "会员状态: 非大会员";
+    }
+    const uid = store.uid ? "UID " + store.uid : "";
+    notify(
+      NAME,
+      "Cookie / Session 已更新",
+      [uid, vipLine, "将用于每日自动签到"].filter(Boolean).join("\n")
+    );
+    log("cookie updated", store.uid || "", vipLine);
   }
   $done({});
 }

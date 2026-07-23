@@ -6,7 +6,7 @@
 // Storage: bili_adblock_checkin_v2
 
 const STORE_KEY = "bili_adblock_checkin_v2"; // v2: 换键丢弃旧 lastRunOk，避免误标成功导致不再签
-const SCRIPT_VERSION = "2.0.8";
+const SCRIPT_VERSION = "2.0.9";
 const NAME = "哔哩签到";
 
 function parseArgs(raw) {
@@ -1223,15 +1223,17 @@ async function doCheckin(opts, flags) {
   log(
     "boot",
     "v=" + SCRIPT_VERSION,
-    "type=" + (stype || (typeof $request !== "undefined" && $request ? "http-request" : "cron?")),
+    "store=" + STORE_KEY,
+    "type=" + (stype || (typeof $request !== "undefined" && $request ? "http-request" : "?")),
     "name=" + sname,
     "checkin=" + !!opts.自动签到,
     "session=" + (hasSession ? "yes" : "no"),
     "bj=" + JSON.stringify(beijingParts())
   );
 
-  // 无定时任务：打开 B 站只做 trigger
-  // capture 同步、立刻 $done，不阻塞业务请求；签到延后异步执行（类似后台任务）
+  // 无 cron：打开 B 站 trigger
+  // 重要：Surge 在 http-request 里 $done() 之后会结束脚本，setTimeout 不可靠 → 签到必须在 $done 之前 await
+  // 仅在 isCheckinTriggerUrl（fingerprint/tab/mine/splash/nav）上签到，避免拖慢 feed
   if (typeof $request !== "undefined" && $request && $request.url) {
     const reqUrl = String($request.url);
     log("path=open-app capture", reqUrl.slice(0, 120));
@@ -1242,41 +1244,25 @@ async function doCheckin(opts, flags) {
     }
     const should =
       opts.自动签到 && typeof isCheckinTriggerUrl === "function" && isCheckinTriggerUrl(reqUrl);
-    // 先放行请求，再后台签到（Surge 对 $done 后定时器/Promise 支持因版本而异；用 setTimeout 尽量不挡用户）
     if (should) {
-      log("schedule background checkin after $done");
+      log("path=open-app checkin BEFORE $done (reliable)");
       try {
-        setTimeout(function () {
-          doCheckin(opts, { fromOpen: true }).catch(function (e) {
-            log("bg checkin err", e);
-            notify(NAME, "签到失败", String(e));
-          });
-        }, 50);
+        await doCheckin(opts, { fromOpen: true });
       } catch (e) {
-        // 无 setTimeout 时退化为不 await 的 Promise（仍可能被提前回收）
-        doCheckin(opts, { fromOpen: true }).catch(function (err) {
-          log("bg checkin err", err);
-          notify(NAME, "签到失败", String(err));
-        });
+        log("open-app checkin err", e);
+        notify(NAME, "签到失败", String(e));
       }
+    } else {
+      log("path=capture only (not trigger url), skip checkin this request");
     }
     $done({});
   } else if (stype === "event") {
-    log("path=event network-changed");
-    // 网络变化：后台尝试签到（不阻塞）
+    log("path=event network-changed → checkin");
     try {
-      setTimeout(function () {
-        if (opts.自动签到) {
-          doCheckin(opts, { fromOpen: true }).catch(function (e) {
-            log("event checkin err", e);
-          });
-        }
-      }, 100);
+      if (opts.自动签到) await doCheckin(opts, { fromOpen: true });
+      else await probeVipIfSession(opts, "network-changed", false);
     } catch (e) {
-      probeVipIfSession(opts, "network-changed", false).finally(function () {
-        $done({});
-      });
-      return;
+      log("event checkin err", e);
     }
     $done({});
   } else {

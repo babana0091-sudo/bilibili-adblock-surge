@@ -29,10 +29,10 @@ bili-gaia-block = type=http-request,pattern=^https?:\/\/api\.bilibili\.com\/x\/i
 bili-checkin-capture = type=http-request,timeout=15,pattern=^https?:\/\/(?:[\w-]+\.)*(?:bilibili\.com|biliapi\.net|biliapi\.com)\/,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/dev/js/checkin.js,requires-body=0,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&debug={{{debug}}},script-update-interval=0
 # Session 存在时：网络变化/引擎拉起类 event 额外查一次会员（仅日志，脚本内节流）
 bili-checkin-boot = type=event,event-name=network-changed,timeout=20,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/dev/js/checkin.js,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&debug={{{debug}}},script-update-interval=0
-# 自动签到：本地时间 0/10/19/21/22 点各试一次；当日成功后跳过后续时段
-# 每小时整点触发；脚本内仅在北京时间 0/10/19/21/22 执行（与设备时区无关）
+# 自动签到：本地时间 0/10/19/21 + 22:30 点各试一次；当日成功后跳过后续时段
+# 每小时整点触发；脚本内仅在北京时间 0/10/19/21 + 22:30 执行（与设备时区无关）
 # 当日北京时间成功后跳过后续时段
-bili-checkin-cron = type=cron,cronexp=0 * * * *,wake-system=1,timeout=180,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/dev/js/checkin.js,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&debug={{{debug}}},script-update-interval=0
+bili-checkin-cron = type=cron,cronexp=0,30 * * * *,wake-system=1,timeout=180,script-path=https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/dev/js/checkin.js,argument=checkin={{{checkin}}}&silver2coin={{{silver2coin}}}&debug={{{debug}}},script-update-interval=0
 
 [MITM]
 hostname = %APPEND% app.bilibili.com, passport.bilibili.com, data.bilibili.com, api.bilibili.com, api.biliapi.net, app.biliapi.net, grpc.biliapi.net, api.live.bilibili.com, api.vc.bilibili.com, manga.bilibili.com, cm.bilibili.com, miniapp.bilibili.com, line1-h5-mobile-api.biligame.com, line3-h5-mobile-api.biligame.com, game-attribute.biligame.com, app.biligame.com

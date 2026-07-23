@@ -1,6 +1,6 @@
 // Bilibili daily check-in for Surge (network only)
 // - type=http-request: capture Cookie / bili_app_token (URL access_key)
-// - type=cron: hourly tick; only act at Beijing 00/10/19/21/22/22
+// - type=cron: hourly tick; only act at Beijing 00/10/19/21 + 22:30/22
 //   Day key + slots use Asia/Shanghai (UTC+8), not device local TZ.
 //   First success of that Beijing day marks lastRunOk; later slots no-op.
 //
@@ -392,10 +392,39 @@ function randomCheckinDelayMs() {
   return min + Math.floor(Math.random() * (max - min + 1));
 }
 
-const CHECKIN_HOURS_BJ = [0, 10, 19, 21, 22]; // 北京时间 0/10/19/21/22/22
+// Beijing check-in windows:
+// - 0:00–0:59, 10:00–10:59, 19:00–19:59, 21:00–21:59
+// - 22:30–22:59（晚间最后一档）
+const CHECKIN_SLOTS_BJ = [
+  { hour: 0, minuteMin: 0, minuteMax: 59 },
+  { hour: 10, minuteMin: 0, minuteMax: 59 },
+  { hour: 19, minuteMin: 0, minuteMax: 59 },
+  { hour: 21, minuteMin: 0, minuteMax: 59 },
+  { hour: 22, minuteMin: 30, minuteMax: 59 },
+];
 
 function isCheckinHourBeijing() {
-  return CHECKIN_HOURS_BJ.indexOf(beijingParts().hour) >= 0;
+  const p = beijingParts();
+  for (const s of CHECKIN_SLOTS_BJ) {
+    if (p.hour !== s.hour) continue;
+    const mi = p.minute != null ? p.minute : 0;
+    if (mi >= s.minuteMin && mi <= s.minuteMax) return true;
+  }
+  return false;
+}
+
+
+/** Short label of the request that carried Cookie (for notify / later MITM narrowing). */
+function shortRequestLabel(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    let path = u.pathname || "/";
+    if (path.length > 60) path = path.slice(0, 57) + "...";
+    return u.hostname + path;
+  } catch (e) {
+    const s = String(rawUrl || "");
+    return s.length > 80 ? s.slice(0, 77) + "..." : s || "?";
+  }
 }
 
 async function captureCookie(opts) {
@@ -423,11 +452,15 @@ async function captureCookie(opts) {
     if (cookie.includes("SESSDATA") && store.cookie !== cookie) {
       store.cookie = cookie;
       store.cookieUpdatedAt = new Date().toISOString();
+      store.cookieCaptureFrom = shortRequestLabel(url);
+      store.cookieCaptureUrl = String(url).slice(0, 300);
       sessionChanged = true;
       cookieChanged = true;
     } else if (cookie.includes("SESSDATA") && !store.cookie) {
       store.cookie = cookie;
       store.cookieUpdatedAt = new Date().toISOString();
+      store.cookieCaptureFrom = shortRequestLabel(url);
+      store.cookieCaptureUrl = String(url).slice(0, 300);
       sessionChanged = true;
       cookieChanged = true;
     }
@@ -440,6 +473,8 @@ async function captureCookie(opts) {
     // Merge SESSDATA-bearing cookie pieces if store empty
     if (!store.cookie && m.SESSDATA) {
       store.cookie = cookie;
+      store.cookieCaptureFrom = shortRequestLabel(url);
+      store.cookieCaptureUrl = String(url).slice(0, 300);
       sessionChanged = true;
       cookieChanged = true;
       gotCookie = true;
@@ -636,16 +671,24 @@ async function captureCookie(opts) {
   parts.push(vipLine);
   parts.push(store.bili_app_token ? "access_token: 有" : "access_token: 无");
   if (store.uid) parts.push("UID " + store.uid);
-  parts.push(
-    store.cookie && String(store.cookie).includes("SESSDATA")
-      ? "Cookie: 有"
-      : "Cookie: 无"
-  );
+  if (store.cookie && String(store.cookie).includes("SESSDATA")) {
+    const src = store.cookieCaptureFrom || shortRequestLabel(url) || "?";
+    parts.push("Cookie: 有 (" + src + ")");
+  } else {
+    parts.push("Cookie: 无");
+  }
   parts.push(
     notifyKind === "token"
       ? "原因: access_token 更新"
       : "原因: Cookie 更新"
   );
+  if (notifyKind === "cookie" && (store.cookieCaptureFrom || url)) {
+    log(
+      "cookie capture source (record for later narrow MITM)",
+      store.cookieCaptureFrom || shortRequestLabel(url),
+      store.cookieCaptureUrl || String(url).slice(0, 200)
+    );
+  }
   parts.push("登录态已保存");
   const title =
     notifyKind === "token" ? "登录态已捕获 (Token)" : "登录态已捕获 (Cookie)";
@@ -708,7 +751,7 @@ async function doCheckin(opts) {
   }
 
   const day = today(); // Asia/Shanghai YYYY-MM-DD
-  // Same Beijing day + already succeeded: skip remaining 0/10/19/21/22 slots.
+  // Same Beijing day + already succeeded: skip remaining 0/10/19/21 + 22:30 slots.
   // Next Beijing midnight: day string changes => runs again (once per BJ day, not forever).
   if (store.lastRunDay === day && store.lastRunOk) {
     log("already succeeded Beijing day, skip slot", day);

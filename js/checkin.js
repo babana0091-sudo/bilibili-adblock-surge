@@ -6,9 +6,11 @@
 //
 // Tasks (best-effort, API may change):
 // 1) live DoSign  (GET /xlive/web-ucenter/v1/sign/DoSign)
-// 2) exp/reward status
-// 3) vip privilege receive (monthly B-coin coupon if eligible)
-// 4) silver2coin (optional)
+// 2) VIP 大积分签到 (POST /pgc/activity/score/task/sign) — 大会员
+// 3) exp/reward status
+// 4) vip privilege receive (monthly B-coin coupon if eligible)
+// 5) silver2coin (optional)
+// Random delay before tasks to avoid整点风控
 //
 // Storage key: bili_adblock_checkin
 
@@ -174,6 +176,17 @@ function today() {
   return beijingParts().day;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Random delay 45s–8min to avoid on-the-hour bursts. */
+function randomCheckinDelayMs() {
+  const min = 45 * 1000;
+  const max = 8 * 60 * 1000;
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
 const CHECKIN_HOURS_BJ = [0, 10, 19, 21];
 
 function isCheckinHourBeijing() {
@@ -255,6 +268,24 @@ async function doCheckin(opts) {
     return;
   }
 
+  // Avoid整点批量：北京时间时段内再随机延迟一段时间
+  const delayMs = randomCheckinDelayMs();
+  log("random delay ms", delayMs, "bj", beijingParts());
+  await sleep(delayMs);
+
+  // Re-check after delay: day/hour may have changed; still only act in slot hours
+  if (!isCheckinHourBeijing()) {
+    log("after delay: left check-in hour, skip", beijingParts());
+    $done({});
+    return;
+  }
+  const dayAfter = today();
+  if (store.lastRunDay === dayAfter && store.lastRunOk) {
+    log("after delay: already succeeded", dayAfter);
+    $done({});
+    return;
+  }
+
   const cookie = store.cookie;
   const csrf = store.csrf || cookieMap(cookie).bili_jct || "";
   const baseHeaders = {
@@ -294,7 +325,58 @@ async function doCheckin(opts) {
     lines.push("直播签到: 异常 " + e);
   }
 
-  // 2) Exp reward status
+  // 2) VIP 大积分签到（大会员；非会员会失败，忽略）
+  // POST https://api.bilibili.com/pgc/activity/score/task/sign
+  try {
+    const headers = Object.assign({}, baseHeaders, {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Referer: "https://big.bilibili.com/",
+      Origin: "https://www.bilibili.com",
+    });
+    let body = "";
+    if (csrf) body = "csrf=" + encodeURIComponent(csrf);
+    if (store.access_key) {
+      body = (body ? body + "&" : "") + "access_key=" + encodeURIComponent(store.access_key);
+    }
+    const r = await http(
+      "POST",
+      "https://api.bilibili.com/pgc/activity/score/task/sign",
+      headers,
+      body
+    );
+    let j = {};
+    try {
+      j = JSON.parse(r.data || "{}");
+    } catch (e) {
+      j = {};
+    }
+    // 0 success; common already-signed codes vary — treat message hints as ok
+    const msg = String(j.message || j.msg || "");
+    if (j.code === 0) {
+      okAny = true;
+      lines.push("大积分签到: 成功");
+    } else if (
+      /已签|重复|already|今日已|签到过/i.test(msg) ||
+      j.code === 71000 ||
+      j.code === 6000002
+    ) {
+      okAny = true;
+      lines.push("大积分签到: 今日已签 (" + (j.code != null ? j.code : "") + ")");
+    } else if (j.code === -403 || j.code === 6001001 || /非大会员|不是大会员|权限不足|未开通/i.test(msg)) {
+      lines.push("大积分签到: 非会员/无权限，跳过");
+    } else {
+      lines.push(
+        "大积分签到: 失败 code=" +
+          (j.code != null ? j.code : r.status) +
+          " " +
+          msg
+      );
+    }
+  } catch (e) {
+    lines.push("大积分签到: 异常 " + e);
+  }
+
+  // 3) Exp reward status
   try {
     const r = await http(
       "GET",
@@ -316,7 +398,7 @@ async function doCheckin(opts) {
     lines.push("经验任务: 异常 " + e);
   }
 
-  // 3) VIP privilege receive (type=1 B-coin coupon) - monthly, ignore if not eligible
+  // 4) VIP privilege receive (type=1 B-coin coupon) - monthly, ignore if not eligible
   if (csrf) {
     try {
       const body = `type=1&csrf=${encodeURIComponent(csrf)}`;
@@ -341,7 +423,7 @@ async function doCheckin(opts) {
     }
   }
 
-  // 4) silver2coin optional
+  // 5) silver2coin optional
   if (opts.银瓜子换硬币 && csrf) {
     try {
       const body = `csrf_token=${encodeURIComponent(

@@ -1,6 +1,6 @@
 // Bilibili daily check-in for Surge (network only)
 // - type=http-request: capture Cookie / bili_app_token (URL access_key)
-// - type=cron: hourly tick; only act at Beijing 00/10/19/21 + 22:30/22
+// - type=cron: hourly tick; only act at Beijing 00/10/19/21 + 22:40/22
 //   Day key + slots use Asia/Shanghai (UTC+8), not device local TZ.
 //   First success of that Beijing day marks lastRunOk; later slots no-op.
 //
@@ -394,13 +394,13 @@ function randomCheckinDelayMs() {
 
 // Beijing check-in windows:
 // - 0:00–0:59, 10:00–10:59, 19:00–19:59, 21:00–21:59
-// - 22:30–22:59（晚间最后一档）
+// - 22:40–22:59（晚间最后一档）
 const CHECKIN_SLOTS_BJ = [
   { hour: 0, minuteMin: 0, minuteMax: 59 },
   { hour: 10, minuteMin: 0, minuteMax: 59 },
   { hour: 19, minuteMin: 0, minuteMax: 59 },
   { hour: 21, minuteMin: 0, minuteMax: 59 },
-  { hour: 22, minuteMin: 30, minuteMax: 59 },
+  { hour: 22, minuteMin: 40, minuteMax: 59 },
 ];
 
 function isCheckinHourBeijing() {
@@ -751,7 +751,7 @@ async function doCheckin(opts) {
   }
 
   const day = today(); // Asia/Shanghai YYYY-MM-DD
-  // Same Beijing day + already succeeded: skip remaining 0/10/19/21 + 22:30 slots.
+  // Same Beijing day + already succeeded: skip remaining 0/10/19/21 + 22:40 slots.
   // Next Beijing midnight: day string changes => runs again (once per BJ day, not forever).
   if (store.lastRunDay === day && store.lastRunOk) {
     log("already succeeded Beijing day, skip slot", day);

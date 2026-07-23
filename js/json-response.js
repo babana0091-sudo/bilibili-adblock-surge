@@ -84,23 +84,48 @@ function isAdItem(item, opts) {
     return opts.小游戏广告 || opts.常规广告;
   }
 
-  // short drama / playlet promo
+  // short drama / playlet promo (Story 竖屏流里的短剧/外跳推广)
+  // 含 playlet 链接、短剧 goto、红果等外链下载引导时，在 ad_drama 开启下剔除
+  const title = String(
+    item.title || item.desc || item.subtitle || item.rcmd_reason || ""
+  );
+  const extraText = String(
+    (item.args && (item.args.up_name || item.args.rname)) ||
+      item.up_name ||
+      item.author_name ||
+      ""
+  );
   if (
-    /playlet|comic_drama|short_play|shortplay|bilibili:\/\/(pgc\/)?drama|bilibili:\/\/comic/i.test(
-      uri
-    ) ||
-    /playlet|drama|short_play/.test(goto) ||
-    /playlet|drama/.test(cardType)
+    opts.短剧广告 ||
+    opts.常规广告
   ) {
     if (
-      item.ad_info ||
-      item.badge === "广告" ||
-      item.badge_text === "广告" ||
-      item.is_ad ||
-      goto.startsWith("ad") ||
-      cardType.startsWith("cm")
+      /playlet|comic_drama|short_play|shortplay|bilibili:\/\/(pgc\/)?drama|bilibili:\/\/comic|hongguo|redfruit|free.?short.?play/i.test(
+        uri
+      ) ||
+      /playlet|drama|short_play|shortplay|ogv_playlet/.test(goto) ||
+      /playlet|drama|short_play/.test(cardType) ||
+      /红果|免费短剧|短剧免费|海量短剧/.test(title + extraText) ||
+      item.playlet_info ||
+      item.playlet ||
+      item.short_play_info
     ) {
-      return opts.短剧广告 || opts.常规广告;
+      // 明确广告卡 / 外跳推广卡
+      if (
+        item.ad_info ||
+        item.ad_cb ||
+        item.is_ad ||
+        item.is_ad_loc ||
+        item.badge === "广告" ||
+        item.badge_text === "广告" ||
+        goto.startsWith("ad") ||
+        cardType.startsWith("cm") ||
+        /download|appstore|itunes|market:|hongguo|playlet|short_play|drama/i.test(
+          uri
+        )
+      ) {
+        return true;
+      }
     }
   }
 
@@ -197,14 +222,41 @@ function handleSplash(body, opts) {
 function handleFeed(body, opts, url) {
   if (!body.data) return body;
   const isStory = /feed\/index\/story/i.test(url);
+  // story/cart 等纯购物/推广挂件：可直接清空
+  if (isStory && /\/story\/cart/i.test(url) && (opts.常规广告 || opts.短剧广告)) {
+    if (body.data && typeof body.data === "object") {
+      body.data = Array.isArray(body.data) ? [] : {};
+    }
+    return body;
+  }
   if (Array.isArray(body.data.items)) {
     body.data.items = body.data.items.filter((item) => {
       if (isAdItem(item, opts)) return false;
       if (isStory) {
         const goto = String(item.card_goto || item.goto || "").toLowerCase();
-        if ((opts.短剧广告 || opts.常规广告) && (goto.startsWith("ad") || item.ad_info))
+        const uri = String(item.uri || item.link || item.jump_url || "");
+        // 竖屏流广告卡
+        if ((opts.短剧广告 || opts.常规广告) && (goto.startsWith("ad") || item.ad_info || item.ad_cb))
           return false;
-        if (item.story_cart_icon && opts.常规广告) delete item.story_cart_icon;
+        // 短剧/外链下载推广（如红果短剧条）
+        if (
+          opts.短剧广告 &&
+          (/playlet|short_play|shortplay|hongguo|drama/i.test(goto + uri) ||
+            /红果|免费短剧|海量短剧/.test(
+              String(item.title || "") + String(item.desc || "")
+            ))
+        ) {
+          return false;
+        }
+        // 清除 story 购物/挂件推广字段
+        if (opts.常规广告 || opts.短剧广告) {
+          delete item.story_cart_icon;
+          delete item.story_cart;
+          delete item.story_cart_info;
+          if (item.three_point) {
+            // keep structure, strip ad-like entries if array
+          }
+        }
       }
       if (opts.小游戏广告) {
         const goto = String(item.card_goto || item.goto || "").toLowerCase();
@@ -213,6 +265,14 @@ function handleFeed(body, opts, url) {
       }
       return true;
     });
+  }
+  // 清理 story 流顶层挂件
+  if (isStory && (opts.常规广告 || opts.短剧广告)) {
+    for (const k of Object.keys(body.data)) {
+      if (/story_cart|cart_icon|playlet_ad|short_play_ad|drama_ad/i.test(k)) {
+        body.data[k] = Array.isArray(body.data[k]) ? [] : null;
+      }
+    }
   }
   if (Array.isArray(body.data.banner_item) && opts.常规广告) {
     body.data.banner_item = body.data.banner_item.filter(

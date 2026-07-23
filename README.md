@@ -33,7 +33,7 @@ https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bi
 
 固定某一版可用 Releases 资产；日常请用 raw `main` 链以便自动更新。
 
-脚本使用模块内相对路径 `js/*.js`，与模块同分支/同版本一起加载，避免模块更新了脚本还指向旧 URL。
+脚本使用 GitHub raw **绝对 URL**（`.../main/js/*.js`）。远程模块里相对路径 `js/xxx.js` 会被 Surge 报「资源不存在」。
 
 ## 参数
 

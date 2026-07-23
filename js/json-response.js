@@ -37,7 +37,7 @@ function parseArgs(raw) {
       const v = src[k];
       if (typeof v === "boolean") out[k] = v;
       else if (typeof v === "string")
-        out[k] = !/^(0|false|no|off|关闭|否)$/i.test(v);
+        out[k] = !/^(0|false|no|off|关闭|否|#|null|undefined|)$/i.test(String(v).trim());
       else out[k] = !!v;
     }
   }

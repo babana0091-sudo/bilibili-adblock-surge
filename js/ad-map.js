@@ -1,11 +1,10 @@
-// Gaia risk-report interceptor for Surge
-// type=http-request on gaia-gateway/*
-// - 拦截风控上报=true  : short-circuit, DO NOT hit backend
-// - 拦截风控上报=false : pass-through ($done({}))
+// Optional empty-response for pure ad endpoints (replaces always-on Map Local).
+// Only active when 常规广告 / 小游戏广告 is true. Otherwise true pass-through.
 
 function parseArgs(raw) {
   const out = {
-    拦截风控上报: true,
+    常规广告: true,
+    小游戏广告: true,
     调试日志: false,
   };
   if (raw == null || raw === "") return out;
@@ -33,9 +32,11 @@ function parseArgs(raw) {
       if (src[k] === undefined) continue;
       const v = src[k];
       if (typeof v === "boolean") out[k] = v;
-      else if (typeof v === "string")
-        out[k] = !/^(0|false|no|off|关闭|否|#|null|undefined|)$/i.test(String(v).trim());
-      else out[k] = !!v;
+      else if (typeof v === "string") {
+        const s = v.trim().toLowerCase();
+        // Surge sometimes uses # / 0 / false for off
+        out[k] = !/^(0|false|no|off|关闭|否|#|null|undefined|)$/i.test(s);
+      } else out[k] = !!v;
     }
   }
   return out;
@@ -44,21 +45,25 @@ function parseArgs(raw) {
 const opts = parseArgs(typeof $argument !== "undefined" ? $argument : "");
 const url = ($request && $request.url) || "";
 
-if (!opts.拦截风控上报) {
-  if (opts.调试日志) console.log("[BiliAD][gaia] pass-through", url);
+const isGameAd =
+  /biligame\.com|miniapp\.bilibili\.com|game-attribute\.biligame\.com|adLiveGame|advertising_position|iaa_ad_style|mini_game_exit/i.test(
+    url
+  );
+const enabled = isGameAd ? opts.小游戏广告 || opts.常规广告 : opts.常规广告;
+
+if (!enabled) {
+  if (opts.调试日志) console.log("[BiliAD][map] pass-through", url);
   $done({});
 } else {
-  // Short-circuit: request never reaches api.bilibili.com backend.
-  // Prefer non-200 so client does not treat report as accepted success.
-  if (opts.调试日志) console.log("[BiliAD][gaia] blocked (no upstream)", url);
+  if (opts.调试日志) console.log("[BiliAD][map] empty", url);
   $done({
     response: {
-      status: 404,
+      status: 200,
       headers: {
         "Content-Type": "application/json; charset=utf-8",
         Connection: "close",
       },
-      body: "",
+      body: "{}",
     },
   });
 }

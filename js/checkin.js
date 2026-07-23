@@ -45,7 +45,7 @@ function parseArgs(raw) {
       const v = src[k];
       if (typeof v === "boolean") out[k] = v;
       else if (typeof v === "string")
-        out[k] = !/^(0|false|no|off|关闭|否|#)$/i.test(v);
+        out[k] = !/^(0|false|no|off|关闭|否|#|null|undefined|)$/i.test(String(v).trim());
       else out[k] = !!v;
     }
   }
@@ -130,7 +130,12 @@ function today() {
   return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
 }
 
-async function captureCookie() {
+async function captureCookie(opts) {
+  opts = opts || parseArgs(typeof $argument !== "undefined" ? $argument : "");
+  if (!opts.自动签到) {
+    $done({});
+    return;
+  }
   const url = ($request && $request.url) || "";
   const headers = ($request && $request.headers) || {};
   const cookie = getHeader(headers, "Cookie") || getHeader(headers, "cookie");
@@ -317,7 +322,7 @@ async function doCheckin(opts) {
   const opts = parseArgs(typeof $argument !== "undefined" ? $argument : "");
   // Surge distinguishes request vs cron by $request
   if (typeof $request !== "undefined" && $request && $request.url) {
-    await captureCookie();
+    await captureCookie(parseArgs(typeof $argument !== "undefined" ? $argument : ""));
   } else {
     await doCheckin(opts);
   }

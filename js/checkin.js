@@ -15,9 +15,12 @@ const NAME = "哔哩签到";
 
 function parseArgs(raw) {
   const out = {
-    自动签到: true,
+    自动签到: false,
     银瓜子换硬币: false,
     调试日志: false,
+    checkin: false,
+    silver2coin: false,
+    debug: false,
   };
   if (raw == null || raw === "") return out;
   let src = raw;
@@ -49,6 +52,9 @@ function parseArgs(raw) {
       else out[k] = !!v;
     }
   }
+  if (out.checkin !== undefined) out.自动签到 = out.checkin;
+  if (out.silver2coin !== undefined) out.银瓜子换硬币 = out.silver2coin;
+  if (out.debug !== undefined) out.调试日志 = out.debug;
   return out;
 }
 

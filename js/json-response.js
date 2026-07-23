@@ -7,6 +7,12 @@ const DEFAULTS = {
   小游戏广告: true,
   短剧广告: true,
   调试日志: false,
+  // ASCII aliases (v1.2.4+ module args)
+  ad_normal: true,
+  ad_pause: true,
+  ad_game: true,
+  ad_drama: true,
+  debug: false,
 };
 
 function parseArgs(raw) {
@@ -41,6 +47,12 @@ function parseArgs(raw) {
       else out[k] = !!v;
     }
   }
+  // Normalize ASCII -> Chinese
+  if (out.ad_normal !== undefined) out.常规广告 = out.ad_normal;
+  if (out.ad_pause !== undefined) out.暂停广告 = out.ad_pause;
+  if (out.ad_game !== undefined) out.小游戏广告 = out.ad_game;
+  if (out.ad_drama !== undefined) out.短剧广告 = out.ad_drama;
+  if (out.debug !== undefined) out.调试日志 = out.debug;
   return out;
 }
 

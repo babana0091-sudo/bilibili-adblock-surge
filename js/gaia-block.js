@@ -5,8 +5,10 @@
 
 function parseArgs(raw) {
   const out = {
-    拦截风控上报: true,
+    拦截风控上报: false,
     调试日志: false,
+    block_risk: false,
+    debug: false,
   };
   if (raw == null || raw === "") return out;
   let src = raw;
@@ -38,6 +40,8 @@ function parseArgs(raw) {
       else out[k] = !!v;
     }
   }
+  if (out.block_risk !== undefined) out.拦截风控上报 = out.block_risk;
+  if (out.debug !== undefined) out.调试日志 = out.debug;
   return out;
 }
 

@@ -19,6 +19,11 @@ const DEFAULTS = {
   小游戏广告: true,
   短剧广告: true,
   调试日志: false,
+  ad_normal: true,
+  ad_pause: true,
+  ad_game: true,
+  ad_drama: true,
+  debug: false,
 };
 function parseArgs(raw) {
   const out = Object.assign({}, DEFAULTS);
@@ -47,6 +52,11 @@ function parseArgs(raw) {
       else out[k] = !!v;
     }
   }
+  if (out.ad_normal !== undefined) out.常规广告 = out.ad_normal;
+  if (out.ad_pause !== undefined) out.暂停广告 = out.ad_pause;
+  if (out.ad_game !== undefined) out.小游戏广告 = out.ad_game;
+  if (out.ad_drama !== undefined) out.短剧广告 = out.ad_drama;
+  if (out.debug !== undefined) out.调试日志 = out.debug;
   return out;
 }
 const opts = parseArgs(typeof $argument !== 'undefined' ? $argument : '');

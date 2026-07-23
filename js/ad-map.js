@@ -6,6 +6,9 @@ function parseArgs(raw) {
     常规广告: true,
     小游戏广告: true,
     调试日志: false,
+    ad_normal: true,
+    ad_game: true,
+    debug: false,
   };
   if (raw == null || raw === "") return out;
   let src = raw;
@@ -39,6 +42,9 @@ function parseArgs(raw) {
       } else out[k] = !!v;
     }
   }
+  if (out.ad_normal !== undefined) out.常规广告 = out.ad_normal;
+  if (out.ad_game !== undefined) out.小游戏广告 = out.ad_game;
+  if (out.debug !== undefined) out.调试日志 = out.debug;
   return out;
 }
 

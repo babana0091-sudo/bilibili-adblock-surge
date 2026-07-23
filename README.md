@@ -1,104 +1,80 @@
-# 哔哩哔哩去广告 · Surge
+# 哔哩哔哩去广告（融合增强）
 
 <p align="center">
-  <strong>纯网络 MITM</strong> · 不改包 · 不越狱 · 可自动更新
+  <b>Surge 纯网络 MITM 模块</b><br/>
+  不改包 · 不越狱 · 支持自动更新
 </p>
 
-适用于 **Surge iOS / Mac** 的哔哩哔哩去广告模块，可选每日自动签到。
+面向 **Surge iOS / Mac** 的哔哩哔哩网络层去广告方案，可选每日自动签到与大会员大积分相关任务。
 
-## 功能
+## 功能概览
 
-| 能力 | 说明 |
+| 功能 | 说明 |
 |:--|:--|
-| 常规广告 | 开屏、推荐流、Banner、直播/番剧页等 |
-| 暂停广告 | 播放暂停相关商业内容（网络层） |
-| 小游戏广告 | biligame / miniapp 广告位 |
-| 短剧广告 | 竖屏 Story 红果广告短剧整卡移除（`ad_av`/`cm_v2`/红果/天马等） |
-| 自动签到 | 抓 Cookie，每日多时段尝试直播签到等 |
-| 风控上报 | 可选拦截 Gaia 设备上报（默认关） |
+| 常规广告 | 开屏、推荐信息流、Banner、部分直播/番剧商业位等 |
+| 暂停广告 | 播放暂停相关商业内容（网络层清理） |
+| 小游戏广告 | biligame / miniapp 等广告位 |
+| 短剧广告 | 竖屏 Story 流中的红果等推广卡尽量整卡移除 |
+| 自动签到 | 捕获登录态后，按北京时间多时段尝试直播签到等 |
+| 大积分签到 | 大会员账号可顺带尝试大积分相关签到 |
+| 风控上报 | 可选拦截 Gaia 设备上报类请求（默认关闭） |
 
-> 仅处理网络请求/响应。端内本地 UI 广告无法 100% 保证。
+> 本模块只改写/拦截**网络请求与响应**。端内写死的 UI 广告无法保证 100% 去掉。
 
-## 安装（推荐，可自动更新）
+## 安装
+
+推荐使用 raw 链接安装，便于后续在 Surge 内一键更新：
 
 ```text
 https://raw.githubusercontent.com/babana0091-sudo/bilibili-adblock-surge/main/bilibili-adblock.sgmodule
 ```
 
-1. Surge → **模块** → **安装新模块…**
-2. 粘贴上方 **raw** 链接（必须以 `.sgmodule` 结尾）
-3. 启用模块
-4. 开启 **MITM**，并打开 **MITM over HTTP/2**
-5. 以后更新：模块 → **更新**
+1. 打开 Surge → **模块** → **安装新模块…**
+2. 粘贴上方链接（需以 `.sgmodule` 结尾）
+3. 启用本模块
+4. 开启 **MITM**，并打开 **MITM over HTTP/2**（gRPC / 部分接口需要）
+5. 之后可在模块列表中点 **更新**
 
-固定某一版可用 Releases 资产；日常请用 raw `main` 链以便自动更新。
+也可从 [Releases](https://github.com/babana0091-sudo/bilibili-adblock-surge/releases) 下载固定版本的 `.sgmodule`。
 
-脚本使用 GitHub raw **绝对 URL**（`.../main/js/*.js`）。远程模块里相对路径 `js/xxx.js` 会被 Surge 报「资源不存在」。
+## 参数说明
 
-## 参数
+在模块参数中配置（键名为英文，界面说明可为中文）：
 
 | 参数 | 默认 | 含义 |
 |:--|:--:|:--|
 | `ad_normal` | true | 常规广告 |
 | `ad_pause` | true | 暂停广告 |
 | `ad_game` | true | 小游戏广告 |
-| `ad_drama` | true | 短剧广告 |
+| `ad_drama` | true | 短剧 / Story 推广 |
 | `checkin` | true | 自动签到 |
 | `silver2coin` | false | 银瓜子换硬币 |
 | `block_risk` | false | 拦截 Gaia 风控上报 |
 | `debug` | false | 调试日志 |
 
-参数键使用 **ASCII**（`ad_normal` 等），说明可用中文。
+## 自动签到说明
 
-### 自动签到
+1. 启用 `checkin` 后，打开哔哩哔哩 App 首页一次，模块会捕获登录态（App 侧多为 `access_key`，不一定有浏览器 Cookie）。
+2. 按 **北京时间** 在 **0:00 / 10:00 / 19:00 / 21:00** 附近尝试签到；进入时段后会 **随机延迟** 一段时间再执行，降低整点扎堆。
+3. **当天（北京时间）成功一次后**，当天其余时段不再重复执行；次日重新开始。
+4. 会先判断是否为大会员：非会员跳过需会员的任务；直播签到等按接口结果处理。
+5. 捕获登录态时可能弹出一次「登录态已捕获」通知（含会员查询结果）；**同一手机本地自然日最多通知一次**。
+6. 登录态仅保存在本机 Surge `$persistentStore`，不会上传到第三方服务器。
+7. 不需要签到时，将 `checkin` 设为 `false` 即可。
 
-1. 启用模块并打开 App 首页一次（抓取 Cookie）
-2. 按 **北京时间（Asia/Shanghai）** 在 **0:00 / 10:00 / 19:00 / 21:00** 各尝试一次（与手机系统时区无关）
-   - 进入时段后 **随机延迟约 45 秒～8 分钟** 再签，降低整点风控
-   - **当日（北京时间）任一时段成功** → 标记成功，后续时段跳过
-   - 失败则下一时段继续尝试
-   - 次日北京时间 0 点起重新开始（按日期，不是终身只签一次）
-3. **仅大会员**自动签到：用接口判断会员（结果只写 Surge 日志 `[BiliCheckin]`，不弹窗）；非会员整次跳过
-4. **额外会员检测**（有 Cookie 时）：抓到/更新 Session、网络变化、以及每小时 cron 拉起时（30 分钟节流）
-5. 会员任务：直播签到 + **大积分签到** + 经验状态等
-6. 不需要时将 `checkin` 设为 `false`
+## 使用建议
 
-Cookie 仅保存在本机 `$persistentStore`，不会外传。
-
-#### 直播签到入口在哪？
-
-本模块**不点 App 按钮**，直接调直播签到 API：
-
-```text
-GET https://api.live.bilibili.com/xlive/web-ucenter/v1/sign/DoSign
-```
-
-App 内对应能力一般在：**直播 Tab / 直播中心 → 签到**。  
-模块侧：脚本 `js/checkin.js`；cron 每小时整点触发，脚本内用北京时间过滤到 0/10/19/21。
+- 请使用官方 Surge，并保持模块与脚本资源可正常访问 GitHub raw。
+- 若首页或播放异常，可先关闭本模块对照，再检查是否开启了全局 MITM 抓包（`*`）等额外配置。
+- 日志中可搜索 `[BiliCheckin]`、`[BiliAD]` 查看脚本输出（视 Surge 版本在「日志」中查看）。
 
 ## 仓库结构
 
 ```text
 bilibili-adblock.sgmodule   # 模块入口
-js/                        # 脚本
+js/                        # 去广告与签到脚本
 LICENSE                    # AGPL-3.0
 ```
-
-## 分支与脚本
-
-| 分支 | 模块 raw | 脚本 raw |
-|:--|:--|:--|
-| `main` | `.../main/bilibili-adblock.sgmodule` | 仅 `.../main/js/*` |
-| `dev` | `.../dev/bilibili-adblock.sgmodule` | 仅 `.../dev/js/*` |
-
-**禁止交叉引用**（main 不能指 dev 的 JS，反之亦然）。  
-CI：`scripts/validate_module.py` + `.github/workflows/validate.yml` 会在 push/PR 校验。
-
-远程模块必须用 **raw 绝对 URL**；相对路径 `js/xxx.js` 会报「资源不存在」。
-
-## 开发
-
-请在 **`dev`** 分支开发与提交，不要直接往 `main` 推实验改动。稳定后再合并到 `main`。
 
 ## 免责声明与侵权投诉
 
@@ -113,10 +89,10 @@ CI：`scripts/validate_module.py` + `.github/workflows/validate.yml` 会在 push
 
 若权利人认为本仓库内容侵犯其合法权益，请通过邮件联系，并尽量提供：
 
-- 权利人身份与联系方式
-- 被侵权内容的具体位置（链接 / 文件路径）
-- 权属证明与侵权说明
-- 希望的处理方式（下架、修改、标注等）
+- 权利人身份与联系方式  
+- 被侵权内容的具体位置（链接 / 文件路径）  
+- 权属证明与侵权说明  
+- 希望的处理方式（下架、修改、标注等）  
 
 **投诉邮箱：** [babana0091@gmail.com](mailto:babana0091@gmail.com)
 

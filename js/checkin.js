@@ -1,11 +1,11 @@
 // Bilibili daily check-in for Surge (network only)
-// - type=http-request on fingerprint: capture Cookie / access_key
+// - type=http-request: capture Cookie / bili_app_token (URL access_key)
 // - type=cron: hourly tick; only act at Beijing 00/10/19/21
 //   Day key + slots use Asia/Shanghai (UTC+8), not device local TZ.
 //   First success of that Beijing day marks lastRunOk; later slots no-op.
 //
 // Tasks (VIP only; non-VIP skipped with log only, no notification):
-// 0) VIP probe when session exists: cookie capture / network-changed / cron-start
+// 0) VIP on capture notify + cron; session = Cookie or bili_app_token
 //    + again before sign tasks via x/web-interface/nav (fallback x/vip/web/user/info)
 // 1) live DoSign
 // 2) 大积分签到 POST /pgc/activity/score/task/sign
@@ -17,7 +17,7 @@
 // Storage key: bili_adblock_checkin
 
 const STORE_KEY = "bili_adblock_checkin";
-const SCRIPT_VERSION = "2.0.5";
+const SCRIPT_VERSION = "2.0.6";
 const NAME = "哔哩签到";
 
 function parseArgs(raw) {
@@ -117,16 +117,54 @@ function cookieMap(cookie) {
 }
 
 async function detectVipStatus(baseHeaders, accessKey) {
-  // Prefer nav (vipStatus/vipType); fallback vip/web/user/info
+  // App 侧主鉴权是 access_key（URL query）；Web 才是 Cookie SESSDATA。
+  // 官方多数接口：Cookie(SESSDATA) / access_key 二选一即可。
   // Returns { isVip: boolean, detail: string }
   accessKey = accessKey || "";
-  const navUrl =
-    "https://api.bilibili.com/x/web-interface/nav" +
-    (accessKey && !(baseHeaders && baseHeaders.Cookie)
-      ? "?access_key=" + encodeURIComponent(accessKey)
-      : "");
+  function withKey(url) {
+    if (!accessKey) return url;
+    return url + (url.indexOf("?") >= 0 ? "&" : "?") + "access_key=" + encodeURIComponent(accessKey);
+  }
+  // 1) App/oauth style: passport oauth2 info often works with access_key
   try {
-    const r = await http("GET", navUrl, baseHeaders);
+    const r = await http("GET", withKey("https://passport.bilibili.com/x/passport-login/oauth2/info"), baseHeaders, null, 3);
+    const j = JSON.parse(r.data || "{}");
+    if (j.code === 0 && j.data) {
+      const d = j.data;
+      // mid present => logged in; vip fields vary by version
+      const status = d.vip_status != null ? d.vip_status : d.vipStatus;
+      const type = d.vip_type != null ? d.vip_type : d.vipType;
+      const mid = d.mid || d.userid || "";
+      let isVip = status === 1 || status === true || (type > 0 && status !== 0);
+      // some payloads nest vip
+      if (d.vip && (d.vip.status === 1 || d.vip.type > 0)) isVip = true;
+      const detail =
+        "oauth2/info mid=" +
+        mid +
+        " vipStatus=" +
+        status +
+        " vipType=" +
+        type +
+        " via=" +
+        (accessKey ? "access_key" : "cookie");
+      // If login ok but vip fields missing, fall through to nav for vip only
+      if (mid || d.isLogin) {
+        if (status != null || type != null || (d.vip && d.vip.status != null)) {
+          return { isVip: !!isVip, detail: detail };
+        }
+        log("oauth2 login ok, vip fields missing, try nav", detail);
+      } else {
+        log("oauth2 info code/data", j.code, JSON.stringify(d).slice(0, 120));
+      }
+    } else {
+      log("oauth2 info code", j.code, j.message || j.msg || "");
+    }
+  } catch (e) {
+    log("oauth2 info err", e);
+  }
+  // 2) nav (works with Cookie; often also access_key)
+  try {
+    const r = await http("GET", withKey("https://api.bilibili.com/x/web-interface/nav"), baseHeaders, null, 3);
     const j = JSON.parse(r.data || "{}");
     if (j.code === 0 && j.data) {
       const d = j.data;
@@ -134,7 +172,6 @@ async function detectVipStatus(baseHeaders, accessKey) {
       const status = vip.status != null ? vip.status : d.vipStatus;
       const type = vip.type != null ? vip.type : d.vipType;
       const due = vip.due_date || vip.dueDate || d.vipDueDate || 0;
-      // status===1 大会员有效；type 1/2 月度/年度等
       const isVip = status === 1 || status === true || (type > 0 && status !== 0);
       const detail =
         "nav vipStatus=" +
@@ -144,19 +181,33 @@ async function detectVipStatus(baseHeaders, accessKey) {
         " due=" +
         due +
         " isLogin=" +
-        !!d.isLogin;
+        !!d.isLogin +
+        " via=" +
+        (accessKey ? "access_key" : "cookie");
       return { isVip: !!isVip, detail: detail };
     }
     log("nav vip code", j.code, j.message || j.msg || "");
   } catch (e) {
     log("nav vip err", e);
   }
+  // 3) vip privilege my (docs: Cookie / access_key)
   try {
-    const r = await http(
-      "GET",
-      "https://api.bilibili.com/x/vip/web/user/info",
-      baseHeaders
-    );
+    const r = await http("GET", withKey("https://api.bilibili.com/x/vip/privilege/my"), baseHeaders, null, 3);
+    const j = JSON.parse(r.data || "{}");
+    // code 0 with data usually means VIP-capable account; non-vip may still 0 with empty list
+    if (j.code === 0) {
+      return {
+        isVip: true,
+        detail: "vip/privilege/my code=0 (likely VIP or privilege API ok) via=" + (accessKey ? "access_key" : "cookie"),
+      };
+    }
+    // common non-vip / no auth codes — treat as not vip rather than crash
+    log("vip privilege code", j.code, j.message || j.msg || "");
+  } catch (e) {
+    log("vip privilege err", e);
+  }
+  try {
+    const r = await http("GET", withKey("https://api.bilibili.com/x/vip/web/user/info"), baseHeaders, null, 3);
     const j = JSON.parse(r.data || "{}");
     if (j.code === 0 && j.data) {
       const d = j.data;
@@ -172,18 +223,19 @@ async function detectVipStatus(baseHeaders, accessKey) {
   } catch (e) {
     log("vip info err", e);
   }
-  return { isVip: false, detail: "detect failed / not vip" };
+  return { isVip: false, detail: "detect failed / not vip (need access_key or Cookie)" };
 }
 
 function buildAuthHeaders(store) {
   const cookie = (store && store.cookie) || "";
-  return {
-    Cookie: cookie,
+  const h = {
     "User-Agent":
       "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BiliApp",
     Referer: "https://www.bilibili.com/",
     Origin: "https://www.bilibili.com",
   };
+  if (cookie && cookie.includes("SESSDATA")) h.Cookie = cookie;
+  return h;
 }
 
 /**
@@ -199,8 +251,10 @@ async function probeVipIfSession(opts, reason, force) {
     return null;
   }
   const store = readStore();
-  if (!store.cookie || !String(store.cookie).includes("SESSDATA")) {
-    log("vip probe skip: no session cookie", reason || "");
+  const hasCookie = !!(store.cookie && String(store.cookie).includes("SESSDATA"));
+  const hasAK = !!(store.bili_app_token && String(store.bili_app_token).length > 8);
+  if (!hasCookie && !hasAK) {
+    log("vip probe skip: no session (no Cookie SESSDATA and no access_key)", reason || "");
     return null;
   }
   const now = Date.now();
@@ -237,7 +291,7 @@ async function probeVipIfSession(opts, reason, force) {
   }
 
   const hdrs = buildAuthHeaders(store);
-  const vip = await detectVipStatus(hdrs, store.access_key || "");
+  const vip = await detectVipStatus(hdrs, store.bili_app_token || "");
   store.vipCheckedAt = new Date().toISOString();
   store.vipProbeDay = day;
   store.vipProbeReason = reason || "";
@@ -252,9 +306,9 @@ async function probeVipIfSession(opts, reason, force) {
   return vip;
 }
 
-function http(method, url, headers, body) {
+function http(method, url, headers, body, timeoutSec) {
   return new Promise((resolve) => {
-    const opt = { url, headers: headers || {}, timeout: 15 };
+    const opt = { url, headers: headers || {}, timeout: timeoutSec != null ? timeoutSec : 15 };
     if (body != null) opt.body = body;
     const cb = (err, resp, data) => {
       if (err) {
@@ -315,6 +369,14 @@ function today() {
   return beijingParts().day;
 }
 
+/** Device/phone local calendar day YYYY-MM-DD (for session notify once/day). */
+function deviceLocalDay(date) {
+  const d = date || new Date();
+  const p = (n) => (n < 10 ? "0" + n : "" + n);
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+}
+
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -334,9 +396,6 @@ function isCheckinHourBeijing() {
 
 async function captureCookie(opts) {
   opts = opts || parseArgs(typeof $argument !== "undefined" ? $argument : "");
-  // CRITICAL: http-request on app.bilibili.com must return ASAP.
-  // Never await VIP/network here — it can stall the shared H2 connection
-  // and contribute to feed/index empty responses (inBytes=0).
   if (!opts.自动签到) {
     log("capture skip: checkin=false");
     $done({});
@@ -347,95 +406,177 @@ async function captureCookie(opts) {
   const cookie = getHeader(headers, "Cookie") || getHeader(headers, "cookie");
   const auth = getHeader(headers, "Authorization") || "";
   const store = readStore();
-  let changed = false;
+  let sessionChanged = false;
   let gotCookie = false;
-  let gotAccessKey = false;
+  let gotToken = false;
+  let tokenFromReq = "";
 
   if (cookie && cookie.includes("SESSDATA")) {
     gotCookie = true;
     if (store.cookie !== cookie) {
       store.cookie = cookie;
       store.cookieUpdatedAt = new Date().toISOString();
-      changed = true;
+      sessionChanged = true;
     }
     const m = cookieMap(cookie);
     if (m.bili_jct) store.csrf = m.bili_jct;
-    if (m.DedeUserID) store.uid = m.DedeUserID;
+    if (m.DedeUserID && store.uid !== m.DedeUserID) {
+      store.uid = m.DedeUserID;
+      sessionChanged = true;
+    }
   }
 
-  // App requests often have NO Cookie header; session is access_key in query.
+  // App token: URL access_key → store.bili_app_token
   try {
     const u = new URL(url);
     const ak = u.searchParams.get("access_key");
     if (ak && ak.length > 8) {
-      gotAccessKey = true;
-      if (store.access_key !== ak) {
-        store.access_key = ak;
-        store.accessKeyUpdatedAt = new Date().toISOString();
-        changed = true;
+      tokenFromReq = ak;
+      gotToken = true;
+      if (store.bili_app_token !== ak) {
+        store.bili_app_token = ak;
+        store.biliAppTokenUpdatedAt = new Date().toISOString();
+        sessionChanged = true;
       }
     }
   } catch (e) {}
 
-  // Also accept access_key from body if present (rare)
   try {
     const body = ($request && $request.body) || "";
     if (typeof body === "string" && body.includes("access_key=")) {
       const m = body.match(/access_key=([^&]+)/);
-      if (m && m[1] && store.access_key !== m[1]) {
-        store.access_key = decodeURIComponent(m[1]);
-        gotAccessKey = true;
-        changed = true;
+      if (m && m[1]) {
+        const ak = decodeURIComponent(m[1]);
+        if (ak.length > 8) {
+          tokenFromReq = ak;
+          gotToken = true;
+          if (store.bili_app_token !== ak) {
+            store.bili_app_token = ak;
+            store.biliAppTokenUpdatedAt = new Date().toISOString();
+            sessionChanged = true;
+          }
+        }
       }
     }
   } catch (e) {}
 
-  if (auth && auth.length > 10) {
+  if (auth && auth.length > 10 && store.authorization !== auth) {
     store.authorization = auth;
   }
-
-  // mid header as weak uid hint
   const mid = getHeader(headers, "x-bili-mid") || getHeader(headers, "X-Bili-Mid");
-  if (mid && !store.uid) store.uid = String(mid);
-
-  if (changed || gotCookie || gotAccessKey) {
-    writeStore(store);
+  if (mid && String(store.uid || "") !== String(mid)) {
+    store.uid = String(mid);
+    // mid alone does not count as session change for notify spam
   }
+
+  // Always persist silent token/cookie refresh without notify when unchanged
+  if (gotCookie || gotToken || sessionChanged) writeStore(store);
 
   log(
     "capture done",
     "cookie=" + (gotCookie ? "yes" : "no"),
-    "access_key=" + (store.access_key ? "yes" : "no"),
-    "changed=" + changed,
-    "url=" + url.slice(0, 80)
+    "bili_app_token=" + (store.bili_app_token ? "yes" : "no"),
+    "sessionChanged=" + sessionChanged,
+    "url=" + String(url).slice(0, 90)
   );
 
-  // Notify only when we first get a usable session token (cookie OR access_key).
-  // VIP probe is NOT done here (async elsewhere) so we don't block app traffic.
-  if (changed && (gotCookie || gotAccessKey)) {
-    const kind = gotCookie ? "Cookie" : "access_key";
-    const uid = store.uid ? "UID " + store.uid : "";
-    const vipHint =
-      store.isVip === true
-        ? "会员状态: 大会员(缓存)"
-        : store.isVip === false
-          ? "会员状态: 非大会员(缓存)"
-          : "会员状态: 待检测(定时任务)";
-    notify(
-      NAME,
-      kind + " / Session 已更新",
-      [uid, vipHint, "签到将用 access_key 或 Cookie"].filter(Boolean).join("\n")
-    );
+  // Notify policy (device local timezone day):
+  // - At most once per local calendar day
+  // - After a notify today, no more that day even if token rotates
+  // - Next local day: notify again only if token/cookie changed (sessionChanged)
+  if (!sessionChanged) {
+    $done({});
+    return;
   }
 
-  // Always release the request immediately
+  const hasSession = !!(
+    (store.cookie && String(store.cookie).includes("SESSDATA")) ||
+    (store.bili_app_token && String(store.bili_app_token).length > 8)
+  );
+  if (!hasSession) {
+    $done({});
+    return;
+  }
+
+  const localDay = deviceLocalDay();
+  if (store.sessionNotifyLocalDay === localDay) {
+    log("capture notify skip: already notified local day", localDay);
+    $done({});
+    return;
+  }
+
+  // VIP only when we will notify (new local day + credentials changed)
+  let vipLine = "会员: 查询失败";
+  try {
+    const hdrs = buildAuthHeaders(store);
+    const vipPromise = detectVipStatus(hdrs, store.bili_app_token || tokenFromReq || "");
+    const timeoutPromise = new Promise((resolve) =>
+      setTimeout(() => resolve({ isVip: false, detail: "timeout", timedOut: true }), 4000)
+    );
+    const vip = await Promise.race([vipPromise, timeoutPromise]);
+    store.vipCheckedAt = new Date().toISOString();
+    store.vipProbeReason = "capture";
+    if (vip && vip.timedOut) {
+      vipLine = "会员: 查询失败";
+      store.vipDetail = "timeout";
+    } else if (vip && vip.detail && /detect failed/i.test(String(vip.detail))) {
+      vipLine = "会员: 查询失败";
+      store.isVip = false;
+      store.vipDetail = vip.detail || "";
+    } else if (vip && vip.isVip === true) {
+      vipLine = "会员: 大会员";
+      store.isVip = true;
+      store.vipDetail = vip.detail || "";
+    } else if (vip && vip.isVip === false) {
+      store.isVip = false;
+      store.vipDetail = (vip && vip.detail) || "";
+      if (
+        vip.detail &&
+        (/isLogin=true/i.test(vip.detail) ||
+          /mid=\d+/i.test(vip.detail) ||
+          /vipStatus=/i.test(vip.detail) ||
+          /oauth2/i.test(vip.detail) ||
+          /nav /i.test(vip.detail))
+      ) {
+        vipLine = "会员: 非大会员";
+      } else if (vip.detail && /failed|timeout|未登录|-101/i.test(vip.detail)) {
+        vipLine = "会员: 查询失败";
+      } else {
+        vipLine = "会员: 非大会员";
+      }
+    } else {
+      vipLine = "会员: 查询失败";
+    }
+    log("capture vip", vipLine, vip && vip.detail);
+  } catch (e) {
+    vipLine = "会员: 查询失败";
+    log("capture vip err", e);
+  }
+
+  store.sessionNotifyAt = new Date().toISOString();
+  store.sessionNotifyLocalDay = deviceLocalDay(); // phone local calendar day
+  writeStore(store);
+
+  // Order: 会员 → access_token → UID → Cookie last
+  const parts = [];
+  parts.push(vipLine);
+  parts.push(store.bili_app_token ? "access_token: 有" : "access_token: 无");
+  if (store.uid) parts.push("UID " + store.uid);
+  parts.push(
+    gotCookie || (store.cookie && String(store.cookie).includes("SESSDATA"))
+      ? "Cookie: 有"
+      : "Cookie: 无"
+  );
+  parts.push("登录态已保存");
+  notify(NAME, "登录态已捕获", parts.join("\n"));
+  log("session notify (local day + credentials changed)", localDay, parts.join(" | "));
   $done({});
 }
 
 async function doCheckin(opts) {
   const store = readStore();
   const hasCookie = !!(store.cookie && String(store.cookie).includes("SESSDATA"));
-  const hasAK = !!(store.access_key && String(store.access_key).length > 8);
+  const hasAK = !!(store.bili_app_token && String(store.bili_app_token).length > 8);
   if (!hasCookie && !hasAK) {
     // Throttle "no session" notifications: at most once per 6 hours
     const lastN = store.lastNoSessionNotifyAt
@@ -504,7 +645,7 @@ async function doCheckin(opts) {
 
   const cookie = store.cookie || "";
   const csrf = store.csrf || cookieMap(cookie).bili_jct || "";
-  const accessKey = store.access_key || "";
+  const accessKey = store.bili_app_token || "";
   const baseHeaders = {
     "User-Agent":
       "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 BiliApp",
@@ -570,8 +711,8 @@ async function doCheckin(opts) {
     });
     let body = "";
     if (csrf) body = "csrf=" + encodeURIComponent(csrf);
-    if (store.access_key) {
-      body = (body ? body + "&" : "") + "access_key=" + encodeURIComponent(store.access_key);
+    if (store.bili_app_token) {
+      body = (body ? body + "&" : "") + "access_key=" + encodeURIComponent(store.bili_app_token);
     }
     const r = await http(
       "POST",

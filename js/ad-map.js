@@ -53,14 +53,17 @@ function parseArgs(raw) {
 const opts = parseArgs(typeof $argument !== "undefined" ? $argument : "");
 const url = ($request && $request.url) || "";
 
-// 2026 播放页暂停广告：App 模块 BBAdUGCPauseAdPage / requestPauseAdData
-// 主要走 cm.bilibili.com 商业接口 + vip ads materials；也有 under_player 相关
-const isPauseAd =
-  /cm\.bilibili\.com\/cm\/api\/(?:receive\/content\/wise|fees\/wise|conversion)/i.test(
+// 2026 播放页暂停广告（BBAdUGCPauseAdPage / requestPauseAdData / CountdownToast）
+// 素材与商业接口多在 cm.bilibili.com；另有 vip/ads materials、view/ad
+const isCmBiz =
+  /(?:^https?:\/\/)?(?:[\w-]+\.)?cm\.bilibili\.com\//i.test(url) ||
+  /cm\.bilibili\.com/i.test(url);
+const isPauseHint =
+  /pause_?ad|paused_?page|under_?player|underframe|PauseAd|pauseAd|brand_?pause|videodetail_paused/i.test(
     url
-  ) ||
-  /pause_?ad|paused_?page|under_?player|underframe|PauseAd|pauseAd/i.test(url) ||
-  (/vip\/ads\/materials/i.test(url) && opts.暂停广告);
+  );
+const isVipMaterials = /vip\/ads\/materials|x\/v2\/view\/ad|x\/v2\/dm\/ad/i.test(url);
+const isPauseAd = isCmBiz || isPauseHint || isVipMaterials;
 
 const isGameAd =
   /biligame\.com|miniapp\.bilibili\.com|game-attribute\.biligame\.com|adLiveGame|advertising_position|iaa_ad_style|mini_game_exit/i.test(
@@ -73,14 +76,14 @@ else if (isGameAd) enabled = !!(opts.小游戏广告 || opts.常规广告);
 else enabled = !!opts.常规广告;
 
 if (!enabled) {
-  if (opts.调试日志) console.log("[BiliAD][map] pass-through", url.slice(0, 160));
+  if (opts.调试日志) console.log("[BiliAD][map] pass", url.slice(0, 180));
   $done({});
 } else {
   if (opts.调试日志)
     console.log(
-      "[BiliAD][map] empty",
-      isPauseAd ? "pause" : isGameAd ? "game" : "normal",
-      url.slice(0, 160)
+      "[BiliAD][map] block",
+      isPauseAd ? "pause/cm" : isGameAd ? "game" : "normal",
+      url.slice(0, 180)
     );
   $done({
     response: {
@@ -89,7 +92,7 @@ if (!enabled) {
         "Content-Type": "application/json; charset=utf-8",
         Connection: "close",
       },
-      // 空业务体：暂停广告请求无素材则不展示「1秒后将展示广告」
+      // 无素材 → 不出现「1秒后将展示广告」倒计时
       body: '{"code":0,"message":"0","ttl":1,"data":null}',
     },
   });

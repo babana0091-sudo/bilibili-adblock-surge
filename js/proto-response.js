@@ -72,279 +72,204 @@ const isViewAdPath =
   // ONLY main View/View. Do not touch ViewProgress/PlayPause/RelatesFeed/old View.
 
 const isDynPath = /dynamic\.v2\.Dynamic\/Dyn(?:All|Video)(?:\?|$)/i.test(url);
-const needViewStrip = isViewAdPath && (opts.常规广告 || opts.暂停广告 || opts.短剧广告);
-  // 2.0.19: re-enabled with empty-f7 only (see needViewStrip body)
+const needViewStrip = false; // 2.0.20 emergency off (intro). Logic fixed below for retry.
+  // enable later: isViewAdPath && (opts.常规广告 || opts.暂停广告 || opts.短剧广告);
 const needDynStrip = isDynPath && opts.常规广告;
 
 // All rewrite flags off OR path not targeted: true pass-through (do not touch headers/body).
-// Critical bug before: headers were forced to grpc-encoding=identity even when body stayed gzip.
+// Critical: never set grpc-encoding=identity unless body was actually recomposed.
 if (!needViewStrip && !needDynStrip) {
   if (opts.调试日志) console.log('[BiliAD][proto] pass-through', url);
   $done({});
 } else {
-  let headers = $response.headers || {};
   const isQuanX = typeof $task !== 'undefined';
-  const binaryBody = isQuanX ? new Uint8Array($response.bodyBytes) : $response.body;
-  let gzipStrName = 'grpc-encoding';
-  if (!headers[gzipStrName]) {
-    console.log('[BiliAD][proto] header capitalised');
-    gzipStrName = 'Grpc-Encoding';
-  }
-  const isGzipCompress = headers[gzipStrName] === 'gzip';
-  const unGzipBody = isGzipCompress ? pako.ungzip(binaryBody.slice(5)) : binaryBody.slice(5);
-  headers[gzipStrName] = 'identity';
-  if (headers['content-encoding']) headers['content-encoding'] = 'identity';
-  if (headers['Content-Encoding']) headers['Content-Encoding'] = 'identity';
+  let headers = Object.assign({}, $response.headers || {});
+  let binaryBody = isQuanX ? new Uint8Array($response.bodyBytes) : $response.body;
+  // Normalize to Uint8Array (Surge may hand ArrayBuffer / binary string)
+  binaryBody = toUint8(binaryBody);
+  if (!binaryBody || binaryBody.length < 6) {
+    $done({});
+  } else {
+    let gzipStrName = headerKey(headers, 'grpc-encoding') || 'grpc-encoding';
+    const isGzipCompress = String(headers[gzipStrName] || '').toLowerCase() === 'gzip';
+    // gRPC frame: 1 byte flag + 4 byte BE length + payload
+    const frameFlag = binaryBody[0];
+    const frameLen =
+      ((binaryBody[1] << 24) | (binaryBody[2] << 16) | (binaryBody[3] << 8) | binaryBody[4]) >>> 0;
+    const framePayload = binaryBody.subarray(5, 5 + frameLen);
 
-
-  function pbReplaceField7Empty(buf) {
-    let i = 0;
-    const parts = [];
-    let seen = false;
-    while (i < buf.length) {
-      const start = i;
-      let key;
-      try {
-        const r = pbReadVarint(buf, i);
-        key = r[0];
-        i = r[1];
-      } catch (e) {
-        parts.push(buf.subarray(start));
-        break;
-      }
-      const fn = key >>> 3;
-      const wt = key & 7;
-      let end;
-      try {
-        end = pbSkip(buf, i, wt);
-      } catch (e) {
-        parts.push(buf.subarray(start));
-        break;
-      }
-      if (fn === 7) {
-        parts.push(Uint8Array.of(0x3a, 0x00));
-        seen = true;
+    try {
+      let msg;
+      if (frameFlag === 1 || isGzipCompress) {
+        msg = pako.ungzip(framePayload);
       } else {
-        parts.push(buf.subarray(start, end));
+        msg = framePayload;
       }
-      i = end;
+
+      let newMsg = msg;
+      let did = false;
+      if (needViewStrip) {
+        // ONLY replace top-level field 7 with empty message; all other fields raw-copied.
+        newMsg = pbReplaceField7Empty(msg);
+        did = newMsg !== msg && newMsg.length !== msg.length;
+        if (!did) {
+          // even if same length, check not equal
+          did = !u8Equal(newMsg, msg);
+        }
+        if (did) {
+          console.log('[BiliAD][proto] empty field7', msg.length, '->', newMsg.length);
+        }
+      } else if (needDynStrip) {
+        const dynAllReplyObj = DynAllReply.fromBinary(msg, { readUnknownField: true });
+        if (dynAllReplyObj.upList) {
+          dynAllReplyObj.upList = null;
+          newMsg = DynAllReply.toBinary(dynAllReplyObj);
+          did = true;
+          console.log('[BiliAD][proto] clear upList');
+        }
+      }
+
+      if (!did) {
+        // unchanged — do not touch headers/body
+        $done({});
+      } else {
+        // Re-gzip and keep compressed frame flag=1 + header gzip (matches original App path)
+        let outPayload;
+        let outFlag;
+        let outEnc;
+        try {
+          outPayload = pako.gzip(newMsg);
+          outFlag = 1;
+          outEnc = 'gzip';
+        } catch (gzErr) {
+          // fallback identity frame
+          outPayload = newMsg;
+          outFlag = 0;
+          outEnc = 'identity';
+        }
+        const body = packGrpcFrame(outFlag, outPayload);
+        headers[gzipStrName] = outEnc;
+        // avoid HTTP-level double encoding confusion
+        delete headers['content-encoding'];
+        delete headers['Content-Encoding'];
+        if (isQuanX) {
+          $done({
+            bodyBytes: body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+            headers,
+          });
+        } else {
+          $done({ body, headers });
+        }
+      }
+    } catch (e) {
+      // fail open: original body + original headers
+      console.log('[BiliAD][proto] error fail-open', e);
+      $done({});
     }
-    if (!seen) return buf;
-    return pbConcat(parts);
   }
+}
 
-  function processNewBody(raw) {
-    const length = raw.length;
-    let merge = new Uint8Array(5 + length);
-    merge.set(intToUint8Array(length), 1);
-    merge.set(raw, 5);
-    return merge;
+function toUint8(b) {
+  if (!b) return null;
+  if (b instanceof Uint8Array) return b;
+  if (b instanceof ArrayBuffer) return new Uint8Array(b);
+  if (typeof b === 'string') {
+    const a = new Uint8Array(b.length);
+    for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i) & 0xff;
+    return a;
   }
-  function intToUint8Array(num) {
-    let arr = new ArrayBuffer(4);
-    let view = new DataView(arr);
-    view.setUint32(0, num, false);
-    return new Uint8Array(arr);
-  }
-
-  let body = binaryBody;
   try {
-    if (needViewStrip) {
-      // 2.0.19: replace top-level field 7 with empty message only; copy all other fields raw.
-      // Do NOT recursive-strip ad Any (that previously collapsed intro).
-      let msg = unGzipBody;
-      const before = msg.length;
-      msg = pbReplaceField7Empty(msg);
-      console.log('[BiliAD][proto] View/View empty field7', before, '->', msg.length);
-      body = processNewBody(msg); // identity gRPC frame
-    } else if (needDynStrip) {
-      const dynAllReplyObj = DynAllReply.fromBinary(unGzipBody, { readUnknownField: true });
-      if (dynAllReplyObj.upList) {
-        dynAllReplyObj.upList = null;
-        console.log('[BiliAD][proto] clear upList');
-      }
-      body = processNewBody(DynAllReply.toBinary(dynAllReplyObj));
-    }
+    return new Uint8Array(b);
   } catch (e) {
-    console.log('[BiliAD][proto] error', e);
-    body = binaryBody;
+    return null;
   }
-
-  // --- raw protobuf helpers (View/View only) ---
-  function pbReadVarint(buf, i) {
-    let x = 0, s = 0;
-    while (i < buf.length) {
-      const b = buf[i++];
-      x |= (b & 0x7f) << s;
-      if ((b & 0x80) === 0) return [x >>> 0, i];
-      s += 7;
-      if (s > 35) throw new Error('varint');
-    }
-    throw new Error('eof');
+}
+function u8Equal(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+function headerKey(h, name) {
+  const keys = Object.keys(h || {});
+  const low = name.toLowerCase();
+  for (let i = 0; i < keys.length; i++) if (keys[i].toLowerCase() === low) return keys[i];
+  return null;
+}
+function packGrpcFrame(flag, payload) {
+  const out = new Uint8Array(5 + payload.length);
+  out[0] = flag & 0xff;
+  const len = payload.length >>> 0;
+  out[1] = (len >>> 24) & 0xff;
+  out[2] = (len >>> 16) & 0xff;
+  out[3] = (len >>> 8) & 0xff;
+  out[4] = len & 0xff;
+  out.set(payload, 5);
+  return out;
+}
+function pbReadVarint(buf, i) {
+  let x = 0, s = 0;
+  while (i < buf.length) {
+    const b = buf[i++];
+    x |= (b & 0x7f) << s;
+    if ((b & 0x80) === 0) return [x >>> 0, i];
+    s += 7;
+    if (s > 35) throw new Error('varint');
   }
-  function pbSkip(buf, i, wt) {
-    if (wt === 0) return pbReadVarint(buf, i)[1];
-    if (wt === 1) return i + 8;
-    if (wt === 2) {
+  throw new Error('eof');
+}
+function pbSkip(buf, i, wt) {
+  if (wt === 0) return pbReadVarint(buf, i)[1];
+  if (wt === 1) return i + 8;
+  if (wt === 2) {
+    const r = pbReadVarint(buf, i);
+    return r[1] + r[0];
+  }
+  if (wt === 5) return i + 4;
+  throw new Error('wt');
+}
+function pbConcat(parts) {
+  let n = 0;
+  for (let i = 0; i < parts.length; i++) n += parts[i].length;
+  const o = new Uint8Array(n);
+  let p = 0;
+  for (let i = 0; i < parts.length; i++) {
+    o.set(parts[i], p);
+    p += parts[i].length;
+  }
+  return o;
+}
+function pbReplaceField7Empty(buf) {
+  let i = 0;
+  const parts = [];
+  let seen = false;
+  while (i < buf.length) {
+    const start = i;
+    let key;
+    try {
       const r = pbReadVarint(buf, i);
-      return r[1] + r[0];
-    }
-    if (wt === 5) return i + 4;
-    throw new Error('wt');
-  }
-  function pbConcat(parts) {
-    let n = 0;
-    for (let i = 0; i < parts.length; i++) n += parts[i].length;
-    const o = new Uint8Array(n);
-    let p = 0;
-    for (let i = 0; i < parts.length; i++) {
-      o.set(parts[i], p);
-      p += parts[i].length;
-    }
-    return o;
-  }
-  function pbRemoveField(buf, fieldNo) {
-    let i = 0;
-    const parts = [];
-    let ch = false;
-    while (i < buf.length) {
-      const start = i;
-      let key;
-      try {
-        const r = pbReadVarint(buf, i);
-        key = r[0];
-        i = r[1];
-      } catch (e) {
-        parts.push(buf.subarray(start));
-        break;
-      }
-      const fn = key >>> 3;
-      const wt = key & 7;
-      let end;
-      try {
-        end = pbSkip(buf, i, wt);
-      } catch (e) {
-        parts.push(buf.subarray(start));
-        break;
-      }
-      if (fn === fieldNo) ch = true;
-      else parts.push(buf.subarray(start, end));
-      i = end;
-    }
-    return ch ? pbConcat(parts) : buf;
-  }
-  // Only drop a length field if it *is* a google.protobuf.Any for bilibili.ad.v1.*
-  // Do NOT drop parent messages that merely contain a nested ad (that nuked intro).
-  function pbIsBiliAdAny(payload) {
-    // Any field1 = type_url string typically starts near offset 0: key 0x0a (field1 len)
-    if (!payload || payload.length < 20) return false;
-    // Must contain the ad type url
-    const needle = 'type.googleapis.com/bilibili.ad.v1.';
-    let hit = -1;
-    outer: for (let i = 0; i + needle.length <= payload.length && i < 200; i++) {
-      for (let j = 0; j < needle.length; j++) {
-        if (payload[i + j] !== needle.charCodeAt(j)) continue outer;
-      }
-      hit = i;
+      key = r[0];
+      i = r[1];
+    } catch (e) {
+      parts.push(buf.subarray(start));
       break;
     }
-    if (hit < 0) return false;
-    // Heuristic: type_url appears early (Any shape), not deep in a huge intro blob
-    // Allow type_url within first ~120 bytes of this payload
-    if (hit > 120) return false;
-    // Optional: confirm known DTO names nearby
-    const rest = payload.subarray(hit, Math.min(payload.length, hit + 80));
-    const names = ['SourceContentDto', 'AdsControlDto', 'Tab2ExtraDto', 'TabExtraDto', 'PauseAd'];
-    let ok = false;
-    for (let n = 0; n < names.length; n++) {
-      const nm = names[n];
-      inner: for (let i = 0; i + nm.length <= rest.length; i++) {
-        for (let j = 0; j < nm.length; j++) {
-          if (rest[i + j] !== nm.charCodeAt(j)) continue inner;
-        }
-        ok = true;
-        break;
-      }
-      if (ok) break;
+    const fn = key >>> 3;
+    const wt = key & 7;
+    let end;
+    try {
+      end = pbSkip(buf, i, wt);
+    } catch (e) {
+      parts.push(buf.subarray(start));
+      break;
     }
-    return ok;
-  }
-  function pbStripAdTypeUrlFields(buf, depth) {
-    if (depth > 6 || !buf || buf.length < 4) return buf;
-    let i = 0;
-    const parts = [];
-    let ch = false;
-    while (i < buf.length) {
-      const start = i;
-      let key;
-      try {
-        const r = pbReadVarint(buf, i);
-        key = r[0];
-        i = r[1];
-      } catch (e) {
-        parts.push(buf.subarray(start));
-        break;
-      }
-      const fn = key >>> 3;
-      const wt = key & 7;
-      let end;
-      try {
-        end = pbSkip(buf, i, wt);
-      } catch (e) {
-        parts.push(buf.subarray(start));
-        break;
-      }
-      if (wt === 2) {
-        const lr = pbReadVarint(buf, i);
-        const ln = lr[0];
-        const p0 = lr[1];
-        const payload = buf.subarray(p0, p0 + ln);
-        // Drop only ad Any leaves (or small ad wrappers), then recurse into parents
-        if (pbIsBiliAdAny(payload) && ln < 200000) {
-          // still require it looks like Any, not a 150KB intro that embeds ads
-          // Extra guard: payload should be modest OR start with field1 string
-          if (ln < 65536 && payload[0] === 0x0a) {
-            ch = true;
-            i = end;
-            continue;
-          }
-        }
-        const inner = pbStripAdTypeUrlFields(payload, depth + 1);
-        if (inner.length !== payload.length) {
-          ch = true;
-          const keyB = pbWriteVarint((fn << 3) | 2);
-          const lenB = pbWriteVarint(inner.length >>> 0);
-          const piece = new Uint8Array(keyB.length + lenB.length + inner.length);
-          piece.set(keyB, 0);
-          piece.set(lenB, keyB.length);
-          piece.set(inner, keyB.length + lenB.length);
-          parts.push(piece);
-          i = end;
-          continue;
-        }
-      }
+    if (fn === 7) {
+      parts.push(Uint8Array.of(0x3a, 0x00));
+      seen = true;
+    } else {
       parts.push(buf.subarray(start, end));
-      i = end;
     }
-    return ch ? pbConcat(parts) : buf;
+    i = end;
   }
-  function pbWriteVarint(v) {
-    v = v >>> 0;
-    const a = [];
-    while (v >= 0x80) {
-      a.push((v & 0x7f) | 0x80);
-      v >>>= 7;
-    }
-    a.push(v);
-    return Uint8Array.from(a);
-  }
-
-  if (isQuanX) {
-    $done({
-      bodyBytes: body.buffer.slice(body.byteOffset, body.byteLength + body.byteOffset),
-      headers,
-    });
-  } else {
-    $done({ body, headers });
-  }
+  if (!seen) return buf;
+  return pbConcat(parts);
 }

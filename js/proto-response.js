@@ -117,6 +117,8 @@ if (!needViewStrip && !needDynStrip) {
       let msg = unGzipBody;
       const before = msg.length;
       msg = pbRemoveField(msg, 7);
+      // Second pass: only remove google.protobuf.Any leaves for bilibili.ad.v1.*
+      // (does not delete parent intro messages that merely embed ads)
       msg = pbStripAdTypeUrlFields(msg, 0);
       console.log(
         '[BiliAD][proto] View/View strip field7+adAny',
@@ -201,19 +203,44 @@ if (!needViewStrip && !needDynStrip) {
     }
     return ch ? pbConcat(parts) : buf;
   }
-  function pbHasAdTypeUrl(payload) {
-    // ascii search type.googleapis.com/bilibili.ad.v1.
+  // Only drop a length field if it *is* a google.protobuf.Any for bilibili.ad.v1.*
+  // Do NOT drop parent messages that merely contain a nested ad (that nuked intro).
+  function pbIsBiliAdAny(payload) {
+    // Any field1 = type_url string typically starts near offset 0: key 0x0a (field1 len)
+    if (!payload || payload.length < 20) return false;
+    // Must contain the ad type url
     const needle = 'type.googleapis.com/bilibili.ad.v1.';
-    outer: for (let i = 0; i + needle.length <= payload.length; i++) {
+    let hit = -1;
+    outer: for (let i = 0; i + needle.length <= payload.length && i < 200; i++) {
       for (let j = 0; j < needle.length; j++) {
         if (payload[i + j] !== needle.charCodeAt(j)) continue outer;
       }
-      return true;
+      hit = i;
+      break;
     }
-    return false;
+    if (hit < 0) return false;
+    // Heuristic: type_url appears early (Any shape), not deep in a huge intro blob
+    // Allow type_url within first ~120 bytes of this payload
+    if (hit > 120) return false;
+    // Optional: confirm known DTO names nearby
+    const rest = payload.subarray(hit, Math.min(payload.length, hit + 80));
+    const names = ['SourceContentDto', 'AdsControlDto', 'Tab2ExtraDto', 'TabExtraDto', 'PauseAd'];
+    let ok = false;
+    for (let n = 0; n < names.length; n++) {
+      const nm = names[n];
+      inner: for (let i = 0; i + nm.length <= rest.length; i++) {
+        for (let j = 0; j < nm.length; j++) {
+          if (rest[i + j] !== nm.charCodeAt(j)) continue inner;
+        }
+        ok = true;
+        break;
+      }
+      if (ok) break;
+    }
+    return ok;
   }
   function pbStripAdTypeUrlFields(buf, depth) {
-    if (depth > 5 || !buf || buf.length < 4) return buf;
+    if (depth > 6 || !buf || buf.length < 4) return buf;
     let i = 0;
     const parts = [];
     let ch = false;
@@ -242,15 +269,19 @@ if (!needViewStrip && !needDynStrip) {
         const ln = lr[0];
         const p0 = lr[1];
         const payload = buf.subarray(p0, p0 + ln);
-        if (pbHasAdTypeUrl(payload)) {
-          ch = true;
-          i = end;
-          continue;
+        // Drop only ad Any leaves (or small ad wrappers), then recurse into parents
+        if (pbIsBiliAdAny(payload) && ln < 200000) {
+          // still require it looks like Any, not a 150KB intro that embeds ads
+          // Extra guard: payload should be modest OR start with field1 string
+          if (ln < 65536 && payload[0] === 0x0a) {
+            ch = true;
+            i = end;
+            continue;
+          }
         }
         const inner = pbStripAdTypeUrlFields(payload, depth + 1);
         if (inner.length !== payload.length) {
           ch = true;
-          // rebuild field
           const keyB = pbWriteVarint((fn << 3) | 2);
           const lenB = pbWriteVarint(inner.length >>> 0);
           const piece = new Uint8Array(keyB.length + lenB.length + inner.length);

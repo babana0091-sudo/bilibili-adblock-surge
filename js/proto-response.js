@@ -111,16 +111,20 @@ if (!needViewStrip && !needDynStrip) {
   let body = binaryBody;
   try {
     if (needViewStrip) {
-      // 2026-07-26 capture: under-player ads are ViewReply field 7 (cm).
-      // Drop the entire cm message so SourceContentDto / AdsControlDto cards vanish.
-      // Other top-level fields kept via readUnknownField (intro lives outside f7).
-      const viewReplyObj = ViewReply.fromBinary(unGzipBody, { readUnknownField: true });
-      if (viewReplyObj.cm) {
-        console.log('[BiliAD][proto] drop ViewReply.cm (field 7 under-player ads)');
-        viewReplyObj.cm = undefined;
-        delete viewReplyObj.cm;
-      }
-      body = processNewBody(ViewReply.toBinary(viewReplyObj, { writeUnknownFields: true }));
+      // Safer than full protobuf rewrite: only cut top-level field 7 (cm / under-player)
+      // and drop length-delimited blobs that embed bilibili.ad.v1.* type URLs.
+      // Keeps intro (field 5 etc.) byte-identical otherwise — avoids blank intro regressions.
+      let msg = unGzipBody;
+      const before = msg.length;
+      msg = pbRemoveField(msg, 7);
+      msg = pbStripAdTypeUrlFields(msg, 0);
+      console.log(
+        '[BiliAD][proto] View/View strip field7+adAny',
+        before,
+        '->',
+        msg.length
+      );
+      body = processNewBody(msg);
     } else if (needDynStrip) {
       const dynAllReplyObj = DynAllReply.fromBinary(unGzipBody, { readUnknownField: true });
       if (dynAllReplyObj.upList) {
@@ -132,6 +136,146 @@ if (!needViewStrip && !needDynStrip) {
   } catch (e) {
     console.log('[BiliAD][proto] error', e);
     body = binaryBody;
+  }
+
+  // --- raw protobuf helpers (View/View only) ---
+  function pbReadVarint(buf, i) {
+    let x = 0, s = 0;
+    while (i < buf.length) {
+      const b = buf[i++];
+      x |= (b & 0x7f) << s;
+      if ((b & 0x80) === 0) return [x >>> 0, i];
+      s += 7;
+      if (s > 35) throw new Error('varint');
+    }
+    throw new Error('eof');
+  }
+  function pbSkip(buf, i, wt) {
+    if (wt === 0) return pbReadVarint(buf, i)[1];
+    if (wt === 1) return i + 8;
+    if (wt === 2) {
+      const r = pbReadVarint(buf, i);
+      return r[1] + r[0];
+    }
+    if (wt === 5) return i + 4;
+    throw new Error('wt');
+  }
+  function pbConcat(parts) {
+    let n = 0;
+    for (let i = 0; i < parts.length; i++) n += parts[i].length;
+    const o = new Uint8Array(n);
+    let p = 0;
+    for (let i = 0; i < parts.length; i++) {
+      o.set(parts[i], p);
+      p += parts[i].length;
+    }
+    return o;
+  }
+  function pbRemoveField(buf, fieldNo) {
+    let i = 0;
+    const parts = [];
+    let ch = false;
+    while (i < buf.length) {
+      const start = i;
+      let key;
+      try {
+        const r = pbReadVarint(buf, i);
+        key = r[0];
+        i = r[1];
+      } catch (e) {
+        parts.push(buf.subarray(start));
+        break;
+      }
+      const fn = key >>> 3;
+      const wt = key & 7;
+      let end;
+      try {
+        end = pbSkip(buf, i, wt);
+      } catch (e) {
+        parts.push(buf.subarray(start));
+        break;
+      }
+      if (fn === fieldNo) ch = true;
+      else parts.push(buf.subarray(start, end));
+      i = end;
+    }
+    return ch ? pbConcat(parts) : buf;
+  }
+  function pbHasAdTypeUrl(payload) {
+    // ascii search type.googleapis.com/bilibili.ad.v1.
+    const needle = 'type.googleapis.com/bilibili.ad.v1.';
+    outer: for (let i = 0; i + needle.length <= payload.length; i++) {
+      for (let j = 0; j < needle.length; j++) {
+        if (payload[i + j] !== needle.charCodeAt(j)) continue outer;
+      }
+      return true;
+    }
+    return false;
+  }
+  function pbStripAdTypeUrlFields(buf, depth) {
+    if (depth > 5 || !buf || buf.length < 4) return buf;
+    let i = 0;
+    const parts = [];
+    let ch = false;
+    while (i < buf.length) {
+      const start = i;
+      let key;
+      try {
+        const r = pbReadVarint(buf, i);
+        key = r[0];
+        i = r[1];
+      } catch (e) {
+        parts.push(buf.subarray(start));
+        break;
+      }
+      const fn = key >>> 3;
+      const wt = key & 7;
+      let end;
+      try {
+        end = pbSkip(buf, i, wt);
+      } catch (e) {
+        parts.push(buf.subarray(start));
+        break;
+      }
+      if (wt === 2) {
+        const lr = pbReadVarint(buf, i);
+        const ln = lr[0];
+        const p0 = lr[1];
+        const payload = buf.subarray(p0, p0 + ln);
+        if (pbHasAdTypeUrl(payload)) {
+          ch = true;
+          i = end;
+          continue;
+        }
+        const inner = pbStripAdTypeUrlFields(payload, depth + 1);
+        if (inner.length !== payload.length) {
+          ch = true;
+          // rebuild field
+          const keyB = pbWriteVarint((fn << 3) | 2);
+          const lenB = pbWriteVarint(inner.length >>> 0);
+          const piece = new Uint8Array(keyB.length + lenB.length + inner.length);
+          piece.set(keyB, 0);
+          piece.set(lenB, keyB.length);
+          piece.set(inner, keyB.length + lenB.length);
+          parts.push(piece);
+          i = end;
+          continue;
+        }
+      }
+      parts.push(buf.subarray(start, end));
+      i = end;
+    }
+    return ch ? pbConcat(parts) : buf;
+  }
+  function pbWriteVarint(v) {
+    v = v >>> 0;
+    const a = [];
+    while (v >= 0x80) {
+      a.push((v & 0x7f) | 0x80);
+      v >>>= 7;
+    }
+    a.push(v);
+    return Uint8Array.from(a);
   }
 
   if (isQuanX) {

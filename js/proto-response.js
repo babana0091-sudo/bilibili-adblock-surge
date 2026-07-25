@@ -68,11 +68,12 @@ if (method !== 'POST') {
 
 // Exact path ends: do NOT match ViewProgress (old "View" prefix wrongly matched it).
 const isViewAdPath =
-  /viewunite\.v1\.View\/(?:View|TFInfo|RelatesFeed|PlayPause)(?:\?|$)/i.test(url) ||
-  /app\.view\.v1\.View\/View(?:\?|$)/i.test(url);
+  /viewunite\.v1\.View\/View(?:\?|$)/i.test(url);
+  // ONLY main View/View. Do not touch ViewProgress/PlayPause/RelatesFeed/old View.
+
 const isDynPath = /dynamic\.v2\.Dynamic\/Dyn(?:All|Video)(?:\?|$)/i.test(url);
-const needViewStrip = false; // 2.0.18 emergency: View rewrite blanked intro
-  // was: isViewAdPath && (opts.常规广告 || opts.暂停广告 || opts.短剧广告);
+const needViewStrip = isViewAdPath && (opts.常规广告 || opts.暂停广告 || opts.短剧广告);
+  // 2.0.19: re-enabled with empty-f7 only (see needViewStrip body)
 const needDynStrip = isDynPath && opts.常规广告;
 
 // All rewrite flags off OR path not targeted: true pass-through (do not touch headers/body).
@@ -95,6 +96,43 @@ if (!needViewStrip && !needDynStrip) {
   if (headers['content-encoding']) headers['content-encoding'] = 'identity';
   if (headers['Content-Encoding']) headers['Content-Encoding'] = 'identity';
 
+
+  function pbReplaceField7Empty(buf) {
+    let i = 0;
+    const parts = [];
+    let seen = false;
+    while (i < buf.length) {
+      const start = i;
+      let key;
+      try {
+        const r = pbReadVarint(buf, i);
+        key = r[0];
+        i = r[1];
+      } catch (e) {
+        parts.push(buf.subarray(start));
+        break;
+      }
+      const fn = key >>> 3;
+      const wt = key & 7;
+      let end;
+      try {
+        end = pbSkip(buf, i, wt);
+      } catch (e) {
+        parts.push(buf.subarray(start));
+        break;
+      }
+      if (fn === 7) {
+        parts.push(Uint8Array.of(0x3a, 0x00));
+        seen = true;
+      } else {
+        parts.push(buf.subarray(start, end));
+      }
+      i = end;
+    }
+    if (!seen) return buf;
+    return pbConcat(parts);
+  }
+
   function processNewBody(raw) {
     const length = raw.length;
     let merge = new Uint8Array(5 + length);
@@ -112,10 +150,13 @@ if (!needViewStrip && !needDynStrip) {
   let body = binaryBody;
   try {
     if (needViewStrip) {
-      // DISABLED 2.0.18: stripping field7 / ad Any broke intro UI (blank 简介).
-      // Keep pure pass-through for View/View until a field-safe approach is proven.
-      console.log('[BiliAD][proto] View/View pass-through (intro-safe; under-player strip off)');
-      body = binaryBody;
+      // 2.0.19: replace top-level field 7 with empty message only; copy all other fields raw.
+      // Do NOT recursive-strip ad Any (that previously collapsed intro).
+      let msg = unGzipBody;
+      const before = msg.length;
+      msg = pbReplaceField7Empty(msg);
+      console.log('[BiliAD][proto] View/View empty field7', before, '->', msg.length);
+      body = processNewBody(msg); // identity gRPC frame
     } else if (needDynStrip) {
       const dynAllReplyObj = DynAllReply.fromBinary(unGzipBody, { readUnknownField: true });
       if (dynAllReplyObj.upList) {

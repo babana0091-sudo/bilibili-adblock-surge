@@ -169,3 +169,12 @@ IPA 里：
 ---
 
 *生成自 IPA 静态分析；字段号待抓包补全。*
+
+
+---
+
+## 更新：抓包交叉验证（2026-07-26）
+
+详见 **[viewunite-underplayer-ad-structure.md](./viewunite-underplayer-ad-structure.md)**。
+
+结论摘要：框下广告在 `View/View` 响应 **field 7**（CM + `SourceContentDto` Any），不是 PlayPause。

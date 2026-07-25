@@ -1,13 +1,15 @@
-// Optional empty-response for pure ad endpoints (replaces always-on Map Local).
-// Only active when 常规广告 / 小游戏广告 is true. Otherwise true pass-through.
+// Empty-response for pure ad endpoints.
+// ad_normal / ad_game / ad_pause control which classes are blocked.
 
 function parseArgs(raw) {
   const out = {
     常规广告: true,
     小游戏广告: true,
+    暂停广告: true,
     调试日志: false,
     ad_normal: true,
     ad_game: true,
+    ad_pause: true,
     debug: false,
   };
   if (raw == null || raw === "") return out;
@@ -37,13 +39,13 @@ function parseArgs(raw) {
       if (typeof v === "boolean") out[k] = v;
       else if (typeof v === "string") {
         const s = v.trim().toLowerCase();
-        // Surge sometimes uses # / 0 / false for off
         out[k] = !/^(0|false|no|off|关闭|否|#|null|undefined|)$/i.test(s);
       } else out[k] = !!v;
     }
   }
   if (out.ad_normal !== undefined) out.常规广告 = out.ad_normal;
   if (out.ad_game !== undefined) out.小游戏广告 = out.ad_game;
+  if (out.ad_pause !== undefined) out.暂停广告 = out.ad_pause;
   if (out.debug !== undefined) out.调试日志 = out.debug;
   return out;
 }
@@ -51,17 +53,35 @@ function parseArgs(raw) {
 const opts = parseArgs(typeof $argument !== "undefined" ? $argument : "");
 const url = ($request && $request.url) || "";
 
+// 2026 播放页暂停广告：App 模块 BBAdUGCPauseAdPage / requestPauseAdData
+// 主要走 cm.bilibili.com 商业接口 + vip ads materials；也有 under_player 相关
+const isPauseAd =
+  /cm\.bilibili\.com\/cm\/api\/(?:receive\/content\/wise|fees\/wise|conversion)/i.test(
+    url
+  ) ||
+  /pause_?ad|paused_?page|under_?player|underframe|PauseAd|pauseAd/i.test(url) ||
+  (/vip\/ads\/materials/i.test(url) && opts.暂停广告);
+
 const isGameAd =
   /biligame\.com|miniapp\.bilibili\.com|game-attribute\.biligame\.com|adLiveGame|advertising_position|iaa_ad_style|mini_game_exit/i.test(
     url
   );
-const enabled = isGameAd ? opts.小游戏广告 || opts.常规广告 : opts.常规广告;
+
+let enabled = false;
+if (isPauseAd) enabled = !!(opts.暂停广告 || opts.常规广告);
+else if (isGameAd) enabled = !!(opts.小游戏广告 || opts.常规广告);
+else enabled = !!opts.常规广告;
 
 if (!enabled) {
-  if (opts.调试日志) console.log("[BiliAD][map] pass-through", url);
+  if (opts.调试日志) console.log("[BiliAD][map] pass-through", url.slice(0, 160));
   $done({});
 } else {
-  if (opts.调试日志) console.log("[BiliAD][map] empty", url);
+  if (opts.调试日志)
+    console.log(
+      "[BiliAD][map] empty",
+      isPauseAd ? "pause" : isGameAd ? "game" : "normal",
+      url.slice(0, 160)
+    );
   $done({
     response: {
       status: 200,
@@ -69,7 +89,8 @@ if (!enabled) {
         "Content-Type": "application/json; charset=utf-8",
         Connection: "close",
       },
-      body: "{}",
+      // 空业务体：暂停广告请求无素材则不展示「1秒后将展示广告」
+      body: '{"code":0,"message":"0","ttl":1,"data":null}',
     },
   });
 }

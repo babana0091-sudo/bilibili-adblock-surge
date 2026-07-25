@@ -273,6 +273,37 @@ function cleanArray(arr, opts) {
   return arr.filter((it) => !isAdItem(it, opts)).map((it) => cleanObject(it, opts));
 }
 
+
+/** Strip 2026 pause-ad payload fields (JSON View / materials / feed extras). */
+function stripPauseAdFields(node, opts) {
+  if (!opts.暂停广告 || !node || typeof node !== "object") return node;
+  if (Array.isArray(node)) {
+    return node.map(function (x) {
+      return stripPauseAdFields(x, opts);
+    });
+  }
+  const kill =
+    /^(pause_?ads?|paused?_?page|pause_?ad|pauseAd|PauseAds|pauseBar|cm_?under_?player|cmUnderPlayer|under_?player|underframe|underPlayer|brand_?pause|brandPause|ad_source_content(_v2)?|source_content)$/i;
+  const out = {};
+  for (const [k, v] of Object.entries(node)) {
+    if (kill.test(k)) {
+      out[k] = Array.isArray(v) ? [] : null;
+      continue;
+    }
+    // nested search by key fragment
+    if (
+      /pause/i.test(k) &&
+      /ad|under|frame|bar|brand/i.test(k) &&
+      typeof v === "object"
+    ) {
+      out[k] = Array.isArray(v) ? [] : null;
+      continue;
+    }
+    out[k] = stripPauseAdFields(v, opts);
+  }
+  return out;
+}
+
 function cleanObject(node, opts) {
   if (!node || typeof node !== "object") return node;
   if (Array.isArray(node)) return cleanArray(node, opts);
@@ -282,12 +313,13 @@ function cleanObject(node, opts) {
       continue;
     if (
       opts.暂停广告 &&
-      /(pause_?ad|paused?_?page|under_?player|underframe|player_?ad)/i.test(k)
+      /(pause_?ads?|paused?_?page|under_?player|underframe|player_?ad|cm_?under_?player|cmUnderPlayer|PauseAds|pauseBar|pause_ad|brand_?pause)/i.test(
+        k
+      )
     ) {
-      if (v && typeof v === "object") {
-        out[k] = Array.isArray(v) ? [] : null;
-        continue;
-      }
+      // 清空暂停广告 / 框下广告字段（含 ViewUnite PauseAds）
+      out[k] = Array.isArray(v) ? [] : null;
+      continue;
     }
     if (
       opts.小游戏广告 &&
@@ -485,7 +517,8 @@ log(opts.调试日志, "url=", url);
 
 // All ad toggles off: true pass-through (no parse/re-stringify).
 if (!opts.常规广告 && !opts.暂停广告 && !opts.小游戏广告 && !opts.短剧广告) {
-  $done({});
+  if (opts.暂停广告) body = stripPauseAdFields(body, opts);
+$done({});
 } else if (!$response || $response.body == null || $response.body === "") {
   // Upstream already empty/failed — do not rewrite (homepage feed case)
   console.log("[BiliAD][json] empty/missing body pass-through");

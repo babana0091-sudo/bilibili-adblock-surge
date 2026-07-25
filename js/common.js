@@ -113,7 +113,7 @@ function deepCleanAds(node, opts) {
     }
     if (
       opts.暂停广告 &&
-      /^(pause_ad|pausead|paused_page|pausedpage|under_player|underplayer|underframe|player_ad|playerad)$/i.test(
+      /^(pause_ads?|pausead|paused_page|pausedpage|under_player|underplayer|underframe|player_ad|playerad|cm_under_player|cmUnderPlayer|PauseAds|pauseBar|brand_pause)$/i.test(
         k
       )
     ) {

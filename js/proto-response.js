@@ -71,7 +71,8 @@ const isViewAdPath =
   /viewunite\.v1\.View\/(?:View|TFInfo|RelatesFeed|PlayPause)(?:\?|$)/i.test(url) ||
   /app\.view\.v1\.View\/View(?:\?|$)/i.test(url);
 const isDynPath = /dynamic\.v2\.Dynamic\/Dyn(?:All|Video)(?:\?|$)/i.test(url);
-const needViewStrip = isViewAdPath && (opts.常规广告 || opts.暂停广告 || opts.短剧广告);
+const needViewStrip = false; // 2.0.18 emergency: View rewrite blanked intro
+  // was: isViewAdPath && (opts.常规广告 || opts.暂停广告 || opts.短剧广告);
 const needDynStrip = isDynPath && opts.常规广告;
 
 // All rewrite flags off OR path not targeted: true pass-through (do not touch headers/body).
@@ -111,22 +112,10 @@ if (!needViewStrip && !needDynStrip) {
   let body = binaryBody;
   try {
     if (needViewStrip) {
-      // Safer than full protobuf rewrite: only cut top-level field 7 (cm / under-player)
-      // and drop length-delimited blobs that embed bilibili.ad.v1.* type URLs.
-      // Keeps intro (field 5 etc.) byte-identical otherwise — avoids blank intro regressions.
-      let msg = unGzipBody;
-      const before = msg.length;
-      msg = pbRemoveField(msg, 7);
-      // Second pass: only remove google.protobuf.Any leaves for bilibili.ad.v1.*
-      // (does not delete parent intro messages that merely embed ads)
-      msg = pbStripAdTypeUrlFields(msg, 0);
-      console.log(
-        '[BiliAD][proto] View/View strip field7+adAny',
-        before,
-        '->',
-        msg.length
-      );
-      body = processNewBody(msg);
+      // DISABLED 2.0.18: stripping field7 / ad Any broke intro UI (blank 简介).
+      // Keep pure pass-through for View/View until a field-safe approach is proven.
+      console.log('[BiliAD][proto] View/View pass-through (intro-safe; under-player strip off)');
+      body = binaryBody;
     } else if (needDynStrip) {
       const dynAllReplyObj = DynAllReply.fromBinary(unGzipBody, { readUnknownField: true });
       if (dynAllReplyObj.upList) {
